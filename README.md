@@ -24,9 +24,8 @@ A simple, user-friendly desktop application that converts your images into PDF f
 
 ## 📥 Installation
  
-Run from Source Code  
-If the above doesn't work or isn't available, follow these steps:  
-
+Run from Source Code:
+  
 **Step 1:** Install Python  
 
 Visit python.org and Download Python (version 3.7 or newer)  
@@ -51,17 +50,18 @@ Extract the ZIP file to your desired location (e.g., Desktop)
 **Step 4:** Run the Program
 
 -Navigate to where you extracted the files  
--Double-click on image_to_pdf_converter.py  
+-Double-click on pdf_tool.py  
 -If that doesn't work, right-click → "Open with" → "Python"  
 OR  
 open terminal in the same folder as the program and use ```python pdf_tool.py``` 
 
 ## 🚀 How to Use
 Step-by-Step Guide:  
-Start the Program
+Start the Program  
 
-Double-click the application icon or Python file
-Select Your Images
+Double-click the application icon or Python file  
+
+Select Your Images:  
 
 Click the "📁 Select Images" button  
 Browse to your images location  
@@ -69,13 +69,14 @@ Select one or more images (hold Ctrl/Cmd to select multiple)
 Click "Open"  
 
 Choose Conversion Type:  
-Single PDF: Combines all images into one PDF file
-Individual PDFs: Creates separate PDF for each image
-Set Output Options
+Single PDF: Combines all images into one PDF file  
+Individual PDFs: Creates separate PDF for each image  
 
-Filename: Enter your desired filename (without .pdf)
-Save Location: Click "Browse..." to choose where to save
-Convert
+Set Output Options:  
+
+Filename: Enter your desired filename (without .pdf)  
+Save Location: Click "Browse..." to choose where to save  
+Convert  
 
 Click "📄 Convert to PDF" if you need pdf pages of the same size as the image  
 
@@ -124,9 +125,9 @@ Requirements:
 
 -Installation:    
 ```git clone https://github.com/sameerparvezsingh/img-to-pdfv2.git```  
-```cd image-to-pdf-converter```  
+```cd img-to-pdfv2```  
 ```pip install -r requirements.txt```  
-```python image_to_pdf_converter.py```  
+```python pdf_tool.py```  
 
 -Building Executable:    
 ```pip install pyinstaller```  
