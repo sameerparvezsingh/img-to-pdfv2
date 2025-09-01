@@ -23,17 +23,7 @@ A simple, user-friendly desktop application that converts your images into PDF f
 ✅ No internet connection required - works completely offline
 
 ## 📥 Installation
--For Regular Users (No Programming Knowledge Required)
-Option 1: 
-Download Ready-to-Use Application (Easiest)  
-Go to the Releases section  
-Download the file for your system:  
-Windows: ImageToPDF_Windows.exe  
-macOS: ImageToPDF_macOS.app  
-Linux: ImageToPDF_Linux  
-Double-click to run - no installation needed!  
-
-Option 2:   
+ 
 Run from Source Code  
 If the above doesn't work or isn't available, follow these steps:  
 
