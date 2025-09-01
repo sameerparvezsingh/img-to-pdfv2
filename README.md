@@ -45,7 +45,7 @@ Extract the ZIP file to your desired location (e.g., Desktop)
 -Open Command Prompt (Windows) or Terminal (Mac/Linux)  
   --Windows: Press Win + R, type cmd, press Enter  
   --Mac: Press Cmd + Space, type terminal, press Enter  
--Type this command and press Enter: ```pip install Pillow```  
+-Type this command and press Enter: ```pip install -r requirements.txt```  
 -Wait for installation to complete  
 
 **Step 4:** Run the Program
