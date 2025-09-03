@@ -323,7 +323,8 @@ class ImageToPDFConverter:
         )
         
         if filenames:
-            self.image_paths = list(filenames)
+            #self.image_paths = list(filenames)
+            self.image_paths.extend(list(filenames)) #if user selects images in multiple steps. combine all instead of recreating the whole list
             self.display_selected_images()
             self.update_button_states()
             self.update_status(f"Selected {len(self.image_paths)} image(s)")
