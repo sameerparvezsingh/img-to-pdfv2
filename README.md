@@ -50,10 +50,10 @@ Extract the ZIP file to your desired location (e.g., Desktop)
 **Step 4:** Run the Program
 
 -Navigate to where you extracted the files  
--Double-click on pdf_tool.py  
+-Double-click on pdf_tool_latest.py  
 -If that doesn't work, right-click → "Open with" → "Python"  
 OR  
-open terminal in the same folder as the program and use ```python pdf_tool.py``` 
+open terminal in the same folder as the program and use ```python pdf_tool_latest.py``` 
 
 ## 🚀 How to Use
 Step-by-Step Guide:  
@@ -127,11 +127,11 @@ Requirements:
 ```git clone https://github.com/sameerparvezsingh/img-to-pdfv2.git```  
 ```cd img-to-pdfv2```  
 ```pip install -r requirements.txt```  
-```python pdf_tool.py```  
+```python pdf_tool_latest.py```  
 
 -Building Executable:    
 ```pip install pyinstaller```  
-```pyinstaller --onefile --windowed pdf_tool.py```  
+```pyinstaller --onefile --windowed pdf_tool_latest.py```  
 
 
 ## 📝 License
