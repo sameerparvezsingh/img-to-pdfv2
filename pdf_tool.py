@@ -3,7 +3,7 @@
 Image to PDF Converter
 A GUI application for converting images to PDF files with batch processing support.
 Author: Senior Software Engineer
-Version: 1.4
+Version: 1.0
 """
 
 import tkinter as tk
