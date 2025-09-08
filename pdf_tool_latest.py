@@ -1443,9 +1443,9 @@ class ImageToPDFTool(UIStateMixin):
                         # Calculate scaling
                         scale = min(page_width/img_width, page_height/img_height, 1.0)
                         
-                        # Apply margin (5%)
-                        margin = 0.05
-                        scale *= (1 - margin)
+                        # Apply margin (1%) To Do: Add functionality to ask user
+                        # margin = 0.01
+                        # scale *= (1 - margin)
                         
                         scaled_width = img_width * scale
                         scaled_height = img_height * scale

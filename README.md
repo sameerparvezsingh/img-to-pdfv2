@@ -10,17 +10,17 @@ A simple, user-friendly desktop application that converts your images into PDF f
 
 ✅ Convert multiple images to PDF with just a few clicks
 
-✅ Create a single PDF from multiple images OR individual PDFs for each image
-
 ✅ Preview selected images before conversion
+
+✅ Choose the order of images in PDF
 
 ✅ Choose custom filename and save location
 
-✅ Supports popular image formats (JPG, PNG, BMP, GIF, TIFF, WebP)
+✅ Supports popular image formats (JPG, PNG, BMP, GIF, TIFF, WebP. HEIF)
 
 ✅ Clean, intuitive interface that works on any screen size
 
-✅ No internet connection required - works completely offline
+✅ No internet connection required - works completely offline after installation
 
 ## 📥 Installation
  
@@ -63,28 +63,28 @@ Double-click the application icon or Python file
 
 Select Your Images:  
 
-Click the "📁 Select Images" button  
+Click the "Add Images" button  
 Browse to your images location  
 Select one or more images (hold Ctrl/Cmd to select multiple)  
 Click "Open"  
 
-Choose Conversion Type:  
-Single PDF: Combines all images into one PDF file  
-Individual PDFs: Creates separate PDF for each image  
-
-Set Output Options:  
-
-Filename: Enter your desired filename (without .pdf)  
-Save Location: Click "Browse..." to choose where to save  
-Convert  
-
-Click "📄 Convert to PDF" if you need pdf pages of the same size as the image  
-
+Reposition Images:
+Use Move Up, Move down buttons after selecting an image
 OR
+Drag and Drop images from the preview window.
 
-Click "📄 Convert to A4 PDF" if you need the images to be resized on a4 page.  
+Choose Conversion Type:  
+A4:
+Fit to image:  
 
-Select the quality of the A4 in DPI (default is 300)  
+
+Desired Output Options:  
+Program asks the desired save location as soon as conersion is requested.
+Names are auto generated based on timestamps
+ 
+
+
+Select the quality with compression (default is 85%)  
 
 Wait for the success message  
 Find your PDF(s) in the chosen location.
@@ -93,7 +93,7 @@ Find your PDF(s) in the chosen location.
 ## 💡 Tips & Tricks
 Image Order: Images appear in the PDF in the order they're displayed in the preview  
 
-File Naming: When creating individual PDFs, each file gets a number prefix (e.g., document_1_photo.pdf)  
+File Naming: Each file gets new name based on timestamp  
 
 Large Images: The program automatically handles large images - no need to resize first  
 
@@ -102,7 +102,7 @@ Batch Processing: Select hundreds of images at once - the program can handle it!
 ## ❓ Troubleshooting
 **"The program won't start"**  
 -Make sure Python is installed correctly  
--Try running from Command Prompt: python pdf_tool.py  
+-Try running from Command Prompt: python pdf_tool_latest.py  
 
 **"I can't select images"**  
 -Make sure your images are in a supported format (JPG, PNG, etc.)  
@@ -110,7 +110,7 @@ Batch Processing: Select hundreds of images at once - the program can handle it!
 
 **"Convert button is disabled"**  
 -You need to select at least one image first  
--Click "Select Images" and choose your files  
+-Click "Add Images" and choose your files  
 
 **"PDF creation failed"**  
 -Check you have permission to save in the selected folder  
@@ -121,7 +121,11 @@ Batch Processing: Select hundreds of images at once - the program can handle it!
 Best to use a Python virtual environment.  
 Requirements:  
 -Python 3.7+  
--Pillow (PIL) library  
+-Pillow (PIL) library
+-psutil==7.0.0
+-reportlab==4.4.3
+-pillow-heif>=0.13.0
+-numpy>=1.24.0   
 
 -Installation:    
 ```git clone https://github.com/sameerparvezsingh/img-to-pdfv2.git```  
