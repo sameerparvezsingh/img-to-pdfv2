@@ -3,7 +3,7 @@
 
 A simple, user-friendly desktop application that converts your images into PDF files. Perfect for creating PDF documents from photos, scanned documents, or any image files on your computer.
 
-**Tech Used:** Python, Tkinter, Pillow
+**Tech Used:** Python, Tkinter, Pillow, PyMuPDF, PyPDF2
 
 
 ## 🌟 Features
