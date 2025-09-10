@@ -89,7 +89,7 @@ Program asks the desired save location as soon as conversion is requested.
 Names are auto generated based on timestamps  
  
 
-Select the quality(default is medium) and compression. Program will remember the selected preference for future use.  
+Select the quality(default is medium) and compression. (Functionality for program to remember the selected preference will be added in future.)  
 
 Wait for the success message  
 Find your PDF(s) in the chosen location.
