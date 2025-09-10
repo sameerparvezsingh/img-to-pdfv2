@@ -1028,7 +1028,7 @@ class ImageToPDFTool(UIStateMixin):
         self.current_theme = 'clam'
         
         # Load saved preferences
-        self.load_preferences()
+        # self.load_preferences()
         
         # Setup UI
         self.setup_ui()
@@ -1404,7 +1404,7 @@ class ImageToPDFTool(UIStateMixin):
                 self.root.configure(bg='#f0f0f0')
             
             self.current_theme = theme
-            self.save_preferences()
+            # self.save_preferences()
             
         except Exception as e:
             logger.error(f"Error applying theme: {e}")
@@ -2173,10 +2173,10 @@ class ImageToPDFTool(UIStateMixin):
         if self.operation_in_progress:
             if messagebox.askokcancel("Confirm", "Operation in progress. Do you want to quit?"):
                 self.request_cancel()
-                self.save_preferences()
+                # self.save_preferences()
                 self.root.destroy()
         else:
-            self.save_preferences()
+            # self.save_preferences()
             self.root.destroy()
 
 
