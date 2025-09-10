@@ -972,8 +972,8 @@ class PDFCreator:
                     page.compress_content_streams()
                     writer.add_page(page)
                 
-                writer.add_metadata(reader.metadata)
-                writer.compress_identical_objects(remove_use_as_template=True)
+                # writer.add_metadata(reader.metadata)
+                # writer.compress_identical_objects(remove_use_as_template=True)
                 
                 with open(output_path, 'wb') as f:
                     writer.write(f)
@@ -1339,9 +1339,9 @@ class ImageToPDFTool(UIStateMixin):
             ttk.Checkbutton(advanced_frame, text="Enhanced compression",
                            variable=self.use_pymupdf_var).pack(side='left', padx=5)
         
-        self.optimize_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(advanced_frame, text="Optimize PDF size",
-                       variable=self.optimize_var).pack(side='left', padx=5)
+        self.optimize_var = tk.BooleanVar(value=False)
+        # ttk.Checkbutton(advanced_frame, text="Optimize PDF size",
+        #                variable=self.optimize_var).pack(side='left', padx=5)
         
         self.auto_rotate_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(advanced_frame, text="Auto-rotate (EXIF)",
@@ -1988,25 +1988,25 @@ class ImageToPDFTool(UIStateMixin):
                 return
             
             # Optimize if requested
-            if optimize and os.path.exists(output_path):
-                self.root.after(0, lambda: self.progress_bar.update(
-                    total_steps - 0.5,
-                    "Optimizing PDF...",
-                    "Reducing file size..."
-                ))
+            # if optimize and os.path.exists(output_path):
+            #     self.root.after(0, lambda: self.progress_bar.update(
+            #         total_steps - 0.5,
+            #         "Optimizing PDF...",
+            #         "Reducing file size..."
+            #     ))
                 
-                temp_path = output_path + ".tmp"
-                if PDFCreator.optimize_pdf_size(output_path, temp_path):
-                    # Check if optimization reduced size
-                    original_size = os.path.getsize(output_path)
-                    optimized_size = os.path.getsize(temp_path)
+            #     temp_path = output_path + ".tmp"
+            #     if PDFCreator.optimize_pdf_size(output_path, temp_path):
+            #         # Check if optimization reduced size
+            #         original_size = os.path.getsize(output_path)
+            #         optimized_size = os.path.getsize(temp_path)
                     
-                    if optimized_size < original_size * 0.95:  # At least 5% reduction
-                        os.replace(temp_path, output_path)
-                        logger.info(f"PDF optimized: {original_size} -> {optimized_size} bytes")
-                    else:
-                        if os.path.exists(temp_path):
-                            os.remove(temp_path)
+            #         if optimized_size < original_size * 0.95:  # At least 5% reduction
+            #             os.replace(temp_path, output_path)
+            #             logger.info(f"PDF optimized: {original_size} -> {optimized_size} bytes")
+            #         else:
+            #             if os.path.exists(temp_path):
+            #                 os.remove(temp_path)
             
             # Verify result
             if os.path.exists(output_path):
