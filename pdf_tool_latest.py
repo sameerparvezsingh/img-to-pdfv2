@@ -1,10 +1,10 @@
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-from PIL import Image, ImageTk, ExifTags, ImageOps
+from tkinter import ttk, filedialog, messagebox, simpledialog
+from PIL import Image, ImageTk, ExifTags, ImageOps, ImageEnhance
 import os
 import threading
 import time
-from reportlab.lib.pagesizes import letter, A4
+from reportlab.lib.pagesizes import letter, A4, legal
 from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
 import io
@@ -18,16 +18,32 @@ import traceback
 import mimetypes
 from pathlib import Path
 import numpy as np
-import sys 
+import subprocess
+import tempfile
+import json
+import sys
+from collections import OrderedDict
 
-# Optional imports with fallback
+# Try to import optional libraries
+try:
+    from PyPDF2 import PdfReader, PdfWriter
+    PYPDF2_AVAILABLE = True
+except ImportError:
+    PYPDF2_AVAILABLE = False
+
+try:
+    import fitz
+    PYMUPDF_AVAILABLE = True
+except ImportError:
+    PYMUPDF_AVAILABLE = False
+
 try:
     import pillow_heif
     pillow_heif.register_heif_opener()
     HEIF_SUPPORT = True
 except ImportError:
     HEIF_SUPPORT = False
-    
+
 try:
     from PIL import ImageCms
     COLOR_MANAGEMENT = True
@@ -50,10 +66,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Log system info
-logger.info(f"Starting Image to PDF Converter")
+logger.info(f"Starting Image to PDF Converter Pro v2.0")
 logger.info(f"Python version: {sys.version}")
 logger.info(f"PIL version: {Image.__version__}")
 logger.info(f"HEIF support: {HEIF_SUPPORT}")
+logger.info(f"PyMuPDF available: {PYMUPDF_AVAILABLE}")
+logger.info(f"PyPDF2 available: {PYPDF2_AVAILABLE}")
 logger.info(f"Color management: {COLOR_MANAGEMENT}")
 
 class Settings:
@@ -61,39 +79,531 @@ class Settings:
     # Image processing
     DEFAULT_QUALITY = 85
     MAX_IMAGE_SIZE = (1920, 1080)
-    THUMBNAIL_SIZE = (150, 200)
-    MAX_IMAGE_DIMENSION = 10000  # Maximum dimension for safety
+    THUMBNAIL_SIZE = (200, 200)
+    MAX_IMAGE_DIMENSION = 10000
+    
+    # PDF optimization
+    PDF_IMAGE_QUALITY = 85
+    PDF_DPI = 150
+    JPEG_SUBSAMPLING = 2
+    
+    # Compression presets
+    COMPRESSION_PRESETS = {
+        'Maximum': {'quality': 95, 'dpi': 300, 'name': 'Maximum Quality'},
+        'High': {'quality': 85, 'dpi': 200, 'name': 'High Quality'},
+        'Medium': {'quality': 75, 'dpi': 150, 'name': 'Balanced'},
+        'Low': {'quality': 60, 'dpi': 100, 'name': 'Small Size'},
+        'Minimum': {'quality': 40, 'dpi': 72, 'name': 'Minimum Size'}
+    }
     
     # Resource management
     MAX_CPU_PERCENT = 70
     MAX_MEMORY_MB = 1024
+    CRITICAL_CPU_PERCENT = 90
+    CRITICAL_MEMORY_MB = 1500
     BATCH_SIZE = 5
     MAX_WORKERS = max(1, min(multiprocessing.cpu_count() // 2, 4))
     PROCESS_DELAY = 0.1
     
     # File handling
-    MAX_FILE_SIZE_MB = 100  # Maximum individual file size
+    MAX_FILE_SIZE_MB = 100
     SUPPORTED_FORMATS = {
         '.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff', '.tif', 
         '.webp', '.ico', '.heic', '.heif', '.avif'
     }
     
     # PDF settings
-    DEFAULT_DPI = 72
-    MAX_PDF_SIZE_MB = 500  # Warning threshold
+    DEFAULT_DPI = 150
+    MAX_PDF_SIZE_MB = 500
+    
+    # UI settings
+    PREVIEW_SIZE = (400, 400)
+    THEME_OPTIONS = ['clam', 'alt', 'default', 'classic']
 
-class ImageProcessor:
-    """Enhanced image processor with EXIF and alpha channel handling"""
+class ResourceMonitor:
+    """Enhanced resource monitor with alerts"""
+    
+    def __init__(self):
+        self.process = psutil.Process()
+        self.alert_shown = False
+        
+    def get_cpu_usage(self):
+        """Get current CPU usage percentage"""
+        return psutil.cpu_percent(interval=0.1)
+    
+    def get_memory_usage(self):
+        """Get current memory usage in MB"""
+        return self.process.memory_info().rss / 1024 / 1024
+    
+    def get_memory_percent(self):
+        """Get memory usage as percentage"""
+        return self.process.memory_percent()
+    
+    def get_system_memory_available(self):
+        """Get available system memory in MB"""
+        return psutil.virtual_memory().available / 1024 / 1024
+    
+    def should_throttle(self):
+        """Check if we should throttle processing"""
+        cpu_usage = self.get_cpu_usage()
+        memory_usage = self.get_memory_usage()
+        
+        return (cpu_usage > Settings.MAX_CPU_PERCENT or 
+                memory_usage > Settings.MAX_MEMORY_MB)
+    
+    def is_critical(self):
+        """Check if resource usage is critical"""
+        cpu_usage = self.get_cpu_usage()
+        memory_usage = self.get_memory_usage()
+        
+        return (cpu_usage > Settings.CRITICAL_CPU_PERCENT or 
+                memory_usage > Settings.CRITICAL_MEMORY_MB)
+    
+    def get_resource_status(self):
+        """Get detailed resource status"""
+        cpu = self.get_cpu_usage()
+        mem = self.get_memory_usage()
+        mem_percent = self.get_memory_percent()
+        available_mem = self.get_system_memory_available()
+        
+        status = "Normal"
+        if self.is_critical():
+            status = "Critical"
+        elif self.should_throttle():
+            status = "High"
+            
+        return {
+            'cpu': cpu,
+            'memory_mb': mem,
+            'memory_percent': mem_percent,
+            'available_mb': available_mem,
+            'status': status
+        }
+
+class UIStateMixin:
+    """Enhanced UI state management"""
+    
+    def __init__(self):
+        self.ui_elements = []
+        self.operation_in_progress = False
+        self._lock = threading.Lock()
+        self.drag_drop_enabled = True
+        self._cancel_requested = False
+        self.resource_monitor = ResourceMonitor()
+        
+    def register_ui_element(self, element):
+        """Register UI element for state management"""
+        if element and element not in self.ui_elements:
+            self.ui_elements.append(element)
+            
+    def set_ui_state(self, enabled):
+        """Enable/disable all registered UI elements"""
+        state = 'normal' if enabled else 'disabled'
+        
+        self.drag_drop_enabled = enabled
+        
+        for element in self.ui_elements:
+            try:
+                if hasattr(element, 'config'):
+                    element.config(state=state)
+            except Exception as e:
+                logger.debug(f"Could not set state for element: {e}")
+                
+        # Special handling for widgets
+        if hasattr(self, 'image_listbox'):
+            if enabled:
+                self.image_listbox.state(["!disabled"])
+                self.bind_drag_drop_events()
+            else:
+                self.image_listbox.state(["disabled"])
+                self.unbind_drag_drop_events()
+                
+        if hasattr(self, 'cancel_button'):
+            self.cancel_button.config(state='normal' if not enabled else 'disabled')
+        
+        if hasattr(self, 'pause_button'):
+            self.pause_button.config(state='normal' if not enabled else 'disabled')
+            
+    def bind_drag_drop_events(self):
+        """Bind drag and drop events"""
+        self.image_listbox.bind('<Button-1>', self.on_image_click)
+        self.image_listbox.bind('<B1-Motion>', self.on_image_drag)
+        self.image_listbox.bind('<ButtonRelease-1>', self.on_image_drop)
+        
+    def unbind_drag_drop_events(self):
+        """Unbind drag and drop events"""
+        self.image_listbox.unbind('<Button-1>')
+        self.image_listbox.unbind('<B1-Motion>')
+        self.image_listbox.unbind('<ButtonRelease-1>')
+                
+    def operation_started(self):
+        """Call when operation starts"""
+        with self._lock:
+            self.operation_in_progress = True
+            self._cancel_requested = False
+            self._pause_requested = False
+            
+        self.root.after(0, lambda: self.set_ui_state(False))
+        self.root.after(0, lambda: self.root.config(cursor="watch"))
+            
+    def operation_completed(self):
+        """Call when operation completes"""
+        with self._lock:
+            self.operation_in_progress = False
+            self._cancel_requested = False
+            self._pause_requested = False
+                
+        self.root.after(0, lambda: self.set_ui_state(True))
+        self.root.after(0, lambda: self.root.config(cursor=""))
+                
+    def check_operation_in_progress(self):
+        """Check if any operation is in progress"""
+        if self.operation_in_progress:
+            messagebox.showwarning("Warning", "Another operation is in progress. Please wait.")
+            return True
+        return False
+    
+    def request_cancel(self):
+        """Request cancellation"""
+        with self._lock:
+            self._cancel_requested = True
+        logger.info("Cancellation requested by user")
+        
+    def request_pause(self):
+        """Request pause/resume"""
+        with self._lock:
+            self._pause_requested = not getattr(self, '_pause_requested', False)
+        
+    def check_resource_alert(self):
+        """Check and alert for high resource usage"""
+        status = self.resource_monitor.get_resource_status()
+        
+        if status['status'] == 'Critical' and not self.resource_monitor.alert_shown:
+            self.resource_monitor.alert_shown = True
+            
+            response = messagebox.askyesno(
+                "High Resource Usage",
+                f"System resources are running high!\n\n"
+                f"CPU: {status['cpu']:.1f}%\n"
+                f"Memory: {status['memory_mb']:.0f}MB ({status['memory_percent']:.1f}%)\n\n"
+                f"Would you like to pause the operation?"
+            )
+            
+            if response:
+                self.request_pause()
+                
+        elif status['status'] == 'Normal':
+            self.resource_monitor.alert_shown = False
+
+class EnhancedProgressBar:
+    """Enhanced progress bar with pause support"""
+    
+    def __init__(self, parent, root):
+        self.root = root
+        self.frame = ttk.Frame(parent)
+        
+        # Progress bar
+        self.progress = ttk.Progressbar(self.frame, mode='determinate')
+        
+        # Labels
+        self.label = tk.Label(self.frame, text="Ready", font=('Helvetica', 10))
+        self.detail_label = tk.Label(self.frame, text="", font=('Helvetica', 9))
+        self.eta_label = tk.Label(self.frame, text="", font=('Helvetica', 9), fg='blue')
+        
+        # Pack widgets
+        self.label.pack(fill='x', padx=5, pady=(0, 2))
+        self.detail_label.pack(fill='x', padx=5)
+        self.progress.pack(fill='x', padx=5, pady=5)
+        self.eta_label.pack(fill='x', padx=5)
+        
+        self.start_time = None
+        self.pause_time = None
+        self.paused_duration = 0
+        
+    def start(self, total, message="Processing..."):
+        self.progress['maximum'] = total
+        self.progress['value'] = 0
+        self.start_time = time.time()
+        self.paused_duration = 0
+        self.label.config(text=message, fg='black')
+        self.detail_label.config(text="")
+        self.eta_label.config(text="")
+        self.root.update_idletasks()
+        
+    def pause(self):
+        """Pause progress tracking"""
+        self.pause_time = time.time()
+        self.label.config(fg='orange')
+        self.eta_label.config(text="PAUSED", fg='orange')
+        
+    def resume(self):
+        """Resume progress tracking"""
+        if self.pause_time:
+            self.paused_duration += time.time() - self.pause_time
+            self.pause_time = None
+        self.label.config(fg='black')
+        self.eta_label.config(fg='blue')
+        
+    def update(self, current, message="", detail=""):
+        try:
+            self.progress['value'] = current
+            
+            if self.start_time and current > 0 and current < self.progress['maximum']:
+                elapsed = time.time() - self.start_time - self.paused_duration
+                if elapsed > 0:
+                    rate = current / elapsed
+                    remaining = (self.progress['maximum'] - current) / rate
+                    eta = time.strftime('%M:%S', time.gmtime(remaining))
+                    speed = rate * 60  # items per minute
+                    
+                    eta_text = f"ETA: {eta} | Speed: {speed:.1f} items/min"
+                    if not self.pause_time:
+                        self.eta_label.config(text=eta_text, fg='blue')
+            
+            if message:
+                self.label.config(text=message)
+            if detail:
+                self.detail_label.config(text=detail)
+                
+            self.root.update_idletasks()
+        except Exception as e:
+            logger.error(f"Progress update error: {e}")
+            
+    def complete(self, message="Complete"):
+        self.progress['value'] = self.progress['maximum']
+        self.label.config(text=message, fg='green')
+        self.detail_label.config(text="")
+        
+        if self.start_time:
+            total_time = time.time() - self.start_time - self.paused_duration
+            time_str = time.strftime('%M:%S', time.gmtime(total_time))
+            self.eta_label.config(text=f"Completed in {time_str}", fg='green')
+        
+        self.root.update_idletasks()
+        
+    def error(self, message="Error occurred"):
+        self.label.config(text=message, fg='red')
+        self.detail_label.config(text="")
+        self.eta_label.config(text="", fg='red')
+        self.root.update_idletasks()
+        
+    def reset(self):
+        self.progress['value'] = 0
+        self.label.config(text="Ready", fg='black')
+        self.detail_label.config(text="")
+        self.eta_label.config(text="")
+        self.start_time = None
+        self.pause_time = None
+        self.paused_duration = 0
+        
+    def pack(self, **kwargs):
+        self.frame.pack(**kwargs)
+        
+    def grid(self, **kwargs):
+        self.frame.grid(**kwargs)
+
+class ImagePreviewDialog:
+    """Enhanced image preview with metadata"""
+    
+    def __init__(self, parent, image_path):
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title(f"Preview: {os.path.basename(image_path)}")
+        self.image_path = image_path
+        
+        # Make dialog responsive
+        self.dialog.grid_rowconfigure(1, weight=1)
+        self.dialog.grid_columnconfigure(0, weight=1)
+        
+        # Set minimum size
+        self.dialog.minsize(600, 500)
+        
+        self.setup_ui()
+        self.load_image()
+        
+        # Center dialog
+        self.dialog.wait_visibility()  # Ensure the window is visible before grabbing
+        
+        self.dialog.grab_set()
+        self.dialog.transient(parent)
+        
+
+        # Bind resize event
+        self.dialog.bind('<Configure>', self.on_resize)
+
+        #parent.wait_window(self.dialog)
+        
+    def setup_ui(self):
+        # Info frame (top)
+        info_frame = ttk.LabelFrame(self.dialog, text="Image Information", padding=10)
+        info_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=5)
+        
+        self.info_text = tk.Text(info_frame, height=6, wrap=tk.WORD)
+        self.info_text.pack(fill='both', expand=True)
+        
+        # Image frame (center)
+        self.image_frame = ttk.Frame(self.dialog)
+        self.image_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=5)
+        
+        # Canvas for image
+        self.canvas = tk.Canvas(self.image_frame, bg='gray')
+        self.canvas.pack(fill='both', expand=True)
+        
+        # Control frame (bottom)
+        control_frame = ttk.Frame(self.dialog)
+        control_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=5)
+        
+        # Zoom controls
+        # zoom_frame = ttk.Frame(control_frame)
+        # zoom_frame.pack(side='left')
+        
+        # # ttk.Label(zoom_frame, text="Zoom:").pack(side='left', padx=5)
+        # # ttk.Button(zoom_frame, text="-", command=lambda: self.zoom(0.8)).pack(side='left')
+        # # self.zoom_label = ttk.Label(zoom_frame, text="100%")
+        # # self.zoom_label.pack(side='left', padx=5)
+        # # ttk.Button(zoom_frame, text="+", command=lambda: self.zoom(1.2)).pack(side='left')
+        # #ttk.Button(zoom_frame, text="Fit", command=self.fit_to_window).pack(side='left', padx=5)
+        
+        # Close button
+        ttk.Button(control_frame, text="Close", command=self.dialog.destroy).pack(side='right', padx=5)
+        
+        self.current_zoom = 1.0
+        
+    def load_image(self):
+        try:
+            # Load image
+            self.original_image = Image.open(self.image_path)
+            
+            # Get image info
+            info = self.get_image_info()
+            
+            # Display info
+            self.info_text.delete(1.0, tk.END)
+            self.info_text.insert(tk.END, info)
+            self.info_text.config(state='disabled')
+            
+            # Display image
+            self.display_image()
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not load image:\n{str(e)}")
+            self.dialog.destroy()
+    
+    def get_image_info(self):
+        """Get detailed image information"""
+        img = self.original_image
+        
+        # Basic info
+        info = f"File: {os.path.basename(self.image_path)}\n"
+        info += f"Format: {img.format or 'Unknown'}\n"
+        info += f"Mode: {img.mode}\n"
+        info += f"Size: {img.width} x {img.height} pixels\n"
+        
+        # File size
+        file_size = os.path.getsize(self.image_path)
+        if file_size < 1024:
+            info += f"File size: {file_size} bytes\n"
+        elif file_size < 1024 * 1024:
+            info += f"File size: {file_size/1024:.1f} KB\n"
+        else:
+            info += f"File size: {file_size/(1024*1024):.2f} MB\n"
+        
+        # EXIF data
+        if hasattr(img, '_getexif') and img._getexif():
+            exif_data = []
+            exif = img._getexif()
+            
+            important_tags = {
+                'Make': 271,
+                'Model': 272,
+                'DateTime': 306,
+                'Orientation': 274,
+                'XResolution': 282,
+                'YResolution': 283
+            }
+            
+            for name, tag in important_tags.items():
+                if tag in exif:
+                    exif_data.append(f"{name}: {exif[tag]}")
+            
+            if exif_data:
+                info += "\nEXIF Data:\n" + "\n".join(exif_data)
+        
+        return info
+    
+    def display_image(self):
+        """Display image on canvas"""
+        # Calculate display size
+        canvas_width = self.canvas.winfo_width()
+        canvas_height = self.canvas.winfo_height()
+        
+        if canvas_width <= 1 or canvas_height <= 1:
+            self.dialog.after(100, self.display_image)
+            return
+        
+        if canvas_width > 1 and canvas_height > 1:
+            width_ratio = canvas_width / self.original_image.width
+            height_ratio = canvas_height / self.original_image.height
+            self.current_zoom = min(width_ratio, height_ratio) * 0.9  # 90% to add margin
+
+        # Apply zoom
+        display_width = int(self.original_image.width * self.current_zoom)
+        display_height = int(self.original_image.height * self.current_zoom)
+        
+        # Resize image
+        resized = self.original_image.resize(
+            (display_width, display_height),
+            Image.Resampling.LANCZOS
+        )
+        
+        # Convert to PhotoImage
+        self.photo = ImageTk.PhotoImage(resized)
+        
+        # Clear canvas and display
+        self.canvas.delete("all")
+        self.canvas.create_image(
+            canvas_width // 2,
+            canvas_height // 2,
+            anchor='center',
+            image=self.photo
+        )
+        
+        # Update zoom label
+        # self.zoom_label.config(text=f"{int(self.current_zoom * 100)}%")
+    
+    def zoom(self, factor):
+        """Zoom in/out"""
+        new_zoom = self.current_zoom * factor
+        if 0.1 <= new_zoom <= 5.0:  # Limit zoom range
+            self.current_zoom = new_zoom
+            self.display_image()
+    
+    def fit_to_window(self):
+        """Fit image to window"""
+        canvas_width = self.canvas.winfo_width()
+        canvas_height = self.canvas.winfo_height()
+        
+        if canvas_width > 1 and canvas_height > 1:
+            width_ratio = canvas_width / self.original_image.width
+            height_ratio = canvas_height / self.original_image.height
+            self.current_zoom = min(width_ratio, height_ratio) * 0.9  # 90% to add margin
+            self.display_image()
+    
+    def on_resize(self, event):
+        """Handle window resize"""
+        if hasattr(self, 'original_image'):
+            self.display_image()
+
+class OptimizedImageProcessor:
+    """Enhanced image processor with compression presets"""
     
     def __init__(self):
         self.max_workers = Settings.MAX_WORKERS
         self._init_color_profiles()
         
     def _init_color_profiles(self):
-        """Initialize color profiles for color management"""
+        """Initialize color profiles"""
         if COLOR_MANAGEMENT:
             try:
-                # Standard sRGB profile
                 self.srgb_profile = ImageCms.createProfile("sRGB")
             except:
                 self.srgb_profile = None
@@ -101,45 +611,49 @@ class ImageProcessor:
             self.srgb_profile = None
     
     @staticmethod
-    def get_image_info(path):
-        """Get detailed image information"""
-        try:
-            with Image.open(path) as img:
-                info = {
-                    'path': path,
-                    'format': img.format,
-                    'mode': img.mode,
-                    'size': img.size,
-                    'has_alpha': img.mode in ('RGBA', 'LA', 'P'),
-                    'has_transparency': 'transparency' in img.info,
-                    'exif': {}
-                }
-                
-                # Extract EXIF data
-                if hasattr(img, '_getexif') and img._getexif():
-                    exif = img._getexif()
-                    for tag, value in exif.items():
-                        tag_name = ExifTags.TAGS.get(tag, tag)
-                        info['exif'][tag_name] = value
-                
-                return info
-        except Exception as e:
-            logger.error(f"Error getting image info for {path}: {e}")
-            return None
+    def get_compression_settings(preset_name):
+        """Get compression settings for preset"""
+        if preset_name in Settings.COMPRESSION_PRESETS:
+            return Settings.COMPRESSION_PRESETS[preset_name]
+        return Settings.COMPRESSION_PRESETS['Medium']
+    
+    @staticmethod
+    def calculate_optimal_size(img_size, page_size, dpi):
+        """Calculate optimal image size for PDF"""
+        if not page_size:
+            return img_size
+            
+        img_width, img_height = img_size
+        page_width_pts, page_height_pts = page_size
+        
+        # Convert points to pixels at target DPI
+        max_width_px = int(page_width_pts * dpi / 72)
+        max_height_px = int(page_height_pts * dpi / 72)
+        
+        # Apply margin
+        margin = 0.95
+        max_width_px = int(max_width_px * margin)
+        max_height_px = int(max_height_px * margin)
+        
+        # Calculate scale
+        scale = min(max_width_px/img_width, max_height_px/img_height, 1.0)
+        
+        new_width = int(img_width * scale)
+        new_height = int(img_height * scale)
+        
+        return (new_width, new_height)
     
     @staticmethod
     def handle_exif_orientation(img):
-        """Handle EXIF orientation to correct image rotation"""
+        """Handle EXIF orientation"""
         try:
             if hasattr(img, '_getexif') and img._getexif():
                 exif = dict(img._getexif().items())
                 
-                # Check for orientation tag
-                orientation_tag = 274  # Standard EXIF orientation tag
+                orientation_tag = 274
                 if orientation_tag in exif:
                     orientation = exif[orientation_tag]
                     
-                    # Apply rotation based on orientation
                     if orientation == 2:
                         img = img.transpose(Image.FLIP_LEFT_RIGHT)
                     elif orientation == 3:
@@ -157,73 +671,81 @@ class ImageProcessor:
                         
             return img
         except Exception as e:
-            logger.debug(f"Error handling EXIF orientation: {e}")
+            logger.debug(f"EXIF orientation error: {e}")
             return img
     
     @staticmethod
-    def handle_alpha_channel(img, background_color=(255, 255, 255)):
-        """Handle alpha channel and transparency"""
-        if img.mode in ('RGBA', 'LA'):
-            # Create background
-            background = Image.new('RGB', img.size, background_color)
-            
-            # Paste image with alpha channel as mask
-            if img.mode == 'RGBA':
-                background.paste(img, mask=img.split()[3])
-            else:  # LA mode
-                background.paste(img, mask=img.split()[1])
-            
-            return background
-        elif img.mode == 'P':
-            # Handle palette mode with potential transparency
-            img = img.convert('RGBA')
-            return ImageProcessor.handle_alpha_channel(img, background_color)
-        elif img.mode not in ('RGB', 'L'):
-            # Convert other modes to RGB
-            return img.convert('RGB')
+    def optimize_image_for_pdf(img, quality, target_size):
+        """Optimize image for PDF embedding"""
+        # Convert to RGB
+        if img.mode in ('RGBA', 'LA', 'P'):
+            background = Image.new('RGB', img.size, (255, 255, 255))
+            if img.mode == 'P':
+                img = img.convert('RGBA')
+            if img.mode in ('RGBA', 'LA'):
+                background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else img.split()[1])
+            else:
+                background.paste(img)
+            img = background
+        elif img.mode != 'RGB':
+            img = img.convert('RGB')
         
-        return img
-    
-    @staticmethod
-    def apply_color_profile(img):
-        """Apply color profile management"""
-        if COLOR_MANAGEMENT and img.mode == 'RGB':
+        # Resize if needed
+        if target_size and (img.width > target_size[0] or img.height > target_size[1]):
+            img.thumbnail(target_size, Image.Resampling.LANCZOS)
+            
+            # Slight sharpening after resize
             try:
-                # Check if image has embedded profile
-                if 'icc_profile' in img.info:
-                    input_profile = ImageCms.ImageCmsProfile(io.BytesIO(img.info['icc_profile']))
-                    output_profile = ImageCms.createProfile("sRGB")
-                    
-                    # Convert to sRGB
-                    img = ImageCms.profileToProfile(img, input_profile, output_profile)
-                    
-            except Exception as e:
-                logger.debug(f"Color profile conversion error: {e}")
+                enhancer = ImageEnhance.Sharpness(img)
+                img = enhancer.enhance(1.1)
+            except:
+                pass
         
-        return img
+        # Save with optimization
+        buffer = io.BytesIO()
+        
+        save_kwargs = {
+            'format': 'JPEG',
+            'quality': quality,
+            'optimize': True,
+            'progressive': False,
+            'subsampling': Settings.JPEG_SUBSAMPLING
+        }
+        
+        img.save(buffer, **save_kwargs)
+        buffer.seek(0)
+        
+        return buffer
     
-    def preprocess_images_batch(self, file_paths, target_size=None, quality=85, 
-                               progress_callback=None, cancel_check=None):
-        """Batch process images with comprehensive handling"""
-        if target_size is None:
-            target_size = Settings.MAX_IMAGE_SIZE
-            
+    def preprocess_images_batch(self, file_paths, compression_preset, page_size=None,
+                              progress_callback=None, cancel_check=None, pause_check=None):
+        """Batch process images with compression presets"""
+        settings = self.get_compression_settings(compression_preset)
+        quality = settings['quality']
+        dpi = settings['dpi']
+        
         total = len(file_paths)
         processed = []
         errors = []
         
-        logger.info(f"Starting batch processing of {total} images with {self.max_workers} workers")
+        logger.info(f"Processing {total} images with {compression_preset} preset (Q:{quality}, DPI:{dpi})")
         
         try:
-            # Process images in batches
             for batch_start in range(0, total, Settings.BATCH_SIZE):
+                # Check for cancellation
                 if cancel_check and cancel_check():
-                    logger.info("Processing cancelled by user")
+                    logger.info("Processing cancelled")
                     break
                 
+                # Check for pause
+                while pause_check and pause_check():
+                    time.sleep(0.5)
+                    if cancel_check and cancel_check():
+                        break
+                
                 # Resource throttling
-                while ResourceMonitor.should_throttle():
-                    logger.debug("System under load, throttling...")
+                while ResourceMonitor().should_throttle():
+                    logger.debug("Throttling due to high resource usage")
                     time.sleep(0.5)
                     if cancel_check and cancel_check():
                         break
@@ -231,20 +753,16 @@ class ImageProcessor:
                 batch_end = min(batch_start + Settings.BATCH_SIZE, total)
                 batch_files = file_paths[batch_start:batch_end]
                 
-                logger.info(f"Processing batch {batch_start}-{batch_end} of {total}")
-                
-                # Process batch
                 with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
                     futures = {}
                     
                     for i, path in enumerate(batch_files, batch_start):
                         future = executor.submit(
-                            self._process_single_image_safe, 
-                            path, target_size, quality
+                            self._process_single_image_safe,
+                            path, quality, dpi, page_size
                         )
                         futures[future] = (i, path)
                     
-                    # Process completed futures
                     for future in as_completed(futures):
                         i, path = futures[future]
                         
@@ -255,1073 +773,1119 @@ class ImageProcessor:
                                 processed.append(result)
                             else:
                                 errors.append((path, error))
-                                
+                            
                             if progress_callback:
                                 progress_callback(
-                                    len(processed) + len(errors), 
-                                    total, 
-                                    f"Processing {os.path.basename(path)}",
-                                    f"CPU: {ResourceMonitor.get_cpu_usage():.1f}% | Memory: {ResourceMonitor.get_memory_usage():.0f}MB"
+                                    len(processed) + len(errors),
+                                    total,
+                                    f"Processing {os.path.basename(path)}"
                                 )
-                                
                         except Exception as e:
-                            error_msg = f"Error processing {path}: {str(e)}"
-                            logger.error(error_msg)
                             errors.append((path, str(e)))
                 
-                # Delay and cleanup
+                # Cleanup
                 time.sleep(Settings.PROCESS_DELAY)
                 gc.collect()
-                
+        
         except Exception as e:
-            error_msg = f"Batch processing error: {str(e)}"
-            logger.error(error_msg)
-            raise Exception(error_msg)
+            logger.error(f"Batch processing error: {e}")
+            raise
         
-        logger.info(f"Processed {len(processed)} images successfully, {len(errors)} errors")
-        
+        logger.info(f"Processed {len(processed)}/{total} images successfully")
         return processed, errors
     
     @staticmethod
-    def _process_single_image_safe(path, target_size, quality):
-        """Safely process single image with comprehensive error handling"""
+    def _process_single_image_safe(path, quality, dpi, page_size):
+        """Safely process single image"""
         try:
-            return ImageProcessor._process_single_image(path, target_size, quality), None
+            return OptimizedImageProcessor._process_single_image(path, quality, dpi, page_size), None
         except Exception as e:
-            error_msg = f"Failed to process {path}: {str(e)}"
-            logger.error(error_msg)
-            logger.debug(traceback.format_exc())
+            logger.error(f"Error processing {path}: {e}")
             return None, str(e)
     
     @staticmethod
-    def _process_single_image(path, target_size, quality):
-        """Process single image with all enhancements"""
+    def _process_single_image(path, quality, dpi, page_size):
+        """Process single image with optimization"""
         # Validate file
         if not os.path.exists(path):
             raise FileNotFoundError(f"File not found: {path}")
         
-        if not os.access(path, os.R_OK):
-            raise PermissionError(f"Cannot read file: {path}")
-        
         # Check file size
-        file_size_mb = os.path.getsize(path) / 1024 / 1024
+        file_size_mb = os.path.getsize(path) / (1024 * 1024)
         if file_size_mb > Settings.MAX_FILE_SIZE_MB:
-            raise ValueError(f"File too large ({file_size_mb:.1f}MB > {Settings.MAX_FILE_SIZE_MB}MB)")
-        
-        # Validate file type
-        file_ext = os.path.splitext(path)[1].lower()
-        if file_ext not in Settings.SUPPORTED_FORMATS:
-            # Try to detect by content
-            mime_type = mimetypes.guess_type(path)[0]
-            if not mime_type or not mime_type.startswith('image/'):
-                raise ValueError(f"Unsupported file format: {file_ext}")
+            raise ValueError(f"File too large: {file_size_mb:.1f}MB")
         
         with Image.open(path) as img:
-            # Validate image
+            # Verify image
             img.verify()
-            img = Image.open(path)  # Reopen after verify
-            
-            # Check image dimensions
-            if max(img.size) > Settings.MAX_IMAGE_DIMENSION:
-                raise ValueError(f"Image too large: {img.size}")
+            img = Image.open(path)
             
             # Handle EXIF orientation
-            img = ImageProcessor.handle_exif_orientation(img)
+            img = OptimizedImageProcessor.handle_exif_orientation(img)
             
-            # Apply color profile
-            img = ImageProcessor.apply_color_profile(img)
+            # Calculate optimal size
+            if page_size and page_size != "Fit":
+                optimal_size = OptimizedImageProcessor.calculate_optimal_size(
+                    img.size, page_size, dpi
+                )
+            else:
+                optimal_size = None
             
-            # Handle alpha channel and transparency
-            img = ImageProcessor.handle_alpha_channel(img)
-            
-            # Resize if needed
-            img_width, img_height = img.size
-            max_width, max_height = target_size
-            
-            if img_width > max_width or img_height > max_height:
-                # Calculate new size maintaining aspect ratio
-                ratio = min(max_width/img_width, max_height/img_height)
-                new_size = (int(img_width * ratio), int(img_height * ratio))
-                
-                # Use high-quality resampling
-                img = img.resize(new_size, Image.Resampling.LANCZOS)
-                
-                # Sharpen slightly after resize
-                try:
-                    from PIL import ImageEnhance
-                    enhancer = ImageEnhance.Sharpness(img)
-                    img = enhancer.enhance(1.1)
-                except:
-                    pass
-            
-            # Convert to RGB if not already
-            if img.mode != 'RGB':
-                img = img.convert('RGB')
-            
-            # Save to bytes with optimization
-            buffer = io.BytesIO()
-            
-            # Determine best format
-            save_kwargs = {
-                'format': 'JPEG',
-                'quality': quality,
-                'optimize': True,
-                'progressive': True
-            }
-            
-            # Add DPI info
-            save_kwargs['dpi'] = (Settings.DEFAULT_DPI, Settings.DEFAULT_DPI)
-            img.save(buffer, **save_kwargs)
-            buffer.seek(0)
+            # Optimize for PDF
+            buffer = OptimizedImageProcessor.optimize_image_for_pdf(
+                img, quality, optimal_size
+            )
             
             return {
                 'data': buffer.getvalue(),
-                'size': img.size,
-                'format': 'JPEG',
-                'path': path,
-                'original_format': img.format,
-                'file_size': len(buffer.getvalue())
+                'size': img.size if not optimal_size else optimal_size,
+                'path': path
             }
 
-class ResourceMonitor:
-    """Monitor system resources"""
+class PDFCreator:
+    """Enhanced PDF creator with multiple backends"""
     
     @staticmethod
-    def get_cpu_usage():
-        """Get current CPU usage percentage"""
-        return psutil.cpu_percent(interval=0.1)
-    
-    @staticmethod
-    def get_memory_usage():
-        """Get current memory usage in MB"""
-        process = psutil.Process()
-        return process.memory_info().rss / 1024 / 1024
-    
-    @staticmethod
-    def should_throttle():
-        """Check if we should throttle processing"""
-        cpu_usage = ResourceMonitor.get_cpu_usage()
-        memory_usage = ResourceMonitor.get_memory_usage()
+    def create_pdf_reportlab(output_path, processed_images, page_size_option="A4",
+                           progress_callback=None, cancel_check=None):
+        """Create PDF using ReportLab"""
+        # Determine page size
+        page_sizes = {
+            "A4": A4,
+            "Letter": letter,
+            "Legal": legal
+        }
         
-        return (cpu_usage > Settings.MAX_CPU_PERCENT or 
-                memory_usage > Settings.MAX_MEMORY_MB)
-
-class UIStateMixin:
-    """Mixin class for UI state management"""
-    
-    def __init__(self):
-        self.ui_elements = []
-        self.operation_in_progress = False
-        self._lock = threading.Lock()
-        self.drag_drop_enabled = True
-        self._cancel_requested = False
+        page_size = page_sizes.get(page_size_option)
         
-    def register_ui_element(self, element):
-        """Register UI element for state management"""
-        if element and element not in self.ui_elements:
-            self.ui_elements.append(element)
+        # Create canvas
+        c = canvas.Canvas(output_path, pagesize=page_size or A4, compress=1)
+        c.setPageCompression(1)
+        
+        for idx, img_data in enumerate(processed_images):
+            if cancel_check and cancel_check():
+                c.save()
+                return False
             
-    def set_ui_state(self, enabled):
-        """Enable/disable all registered UI elements"""
-        state = 'normal' if enabled else 'disabled'
-        
-        # Update drag and drop state
-        self.drag_drop_enabled = enabled
-        
-        for element in self.ui_elements:
-            try:
-                if hasattr(element, 'config'):
-                    element.config(state=state)
-            except Exception as e:
-                logger.debug(f"Could not set state for element: {e}")
-                
-        # Special handling for listbox
-        if hasattr(self, 'image_listbox'):
-            if enabled:
-                self.image_listbox.config(state='normal')
-                self.bind_drag_drop_events()
+            if progress_callback:
+                progress_callback(idx + 1, len(processed_images), f"Creating page {idx + 1}")
+            
+            # Load image
+            img = Image.open(io.BytesIO(img_data['data']))
+            
+            if page_size_option == "Fit":
+                # Fit page to image
+                img_width, img_height = img.size
+                c.setPageSize((img_width, img_height))
+                c.drawImage(ImageReader(img), 0, 0, width=img_width, height=img_height)
             else:
-                self.image_listbox.config(state='disabled')
-                self.unbind_drag_drop_events()
+                # Fit image to page
+                page_width, page_height = page_size
+                img_width, img_height = img.size
                 
-        # Update cancel button
-        if hasattr(self, 'cancel_button'):
-            self.cancel_button.config(state='normal' if not enabled else 'disabled')
+                # Calculate position
+                margin = 0.01
+                available_width = page_width * (1 - 2 * margin)
+                available_height = page_height * (1 - 2 * margin)
                 
-    def bind_drag_drop_events(self):
-        """Bind drag and drop events to listbox"""
-        self.image_listbox.bind('<Button-1>', self.on_image_click)
-        self.image_listbox.bind('<B1-Motion>', self.on_image_drag)
-        self.image_listbox.bind('<ButtonRelease-1>', self.on_image_drop)
-        
-    def unbind_drag_drop_events(self):
-        """Unbind drag and drop events from listbox"""
-        self.image_listbox.unbind('<Button-1>')
-        self.image_listbox.unbind('<B1-Motion>')
-        self.image_listbox.unbind('<ButtonRelease-1>')
+                scale = min(available_width/img_width, available_height/img_height, 1.0)
                 
-    def operation_started(self):
-        """Call when operation starts"""
-        with self._lock:
-            self.operation_in_progress = True
-            self._cancel_requested = False
+                scaled_width = img_width * scale
+                scaled_height = img_height * scale
+                
+                x = (page_width - scaled_width) / 2
+                y = (page_height - scaled_height) / 2
+                
+                c.drawImage(ImageReader(img), x, y, width=scaled_width, height=scaled_height,
+                          preserveAspectRatio=True, anchor='c')
             
-        self.root.after(0, lambda: self.set_ui_state(False))
-        self.root.after(0, lambda: self.root.config(cursor="watch"))
-            
-    def operation_completed(self):
-        """Call when operation completes"""
-        with self._lock:
-            self.operation_in_progress = False
-            self._cancel_requested = False
-                
-        self.root.after(0, lambda: self.set_ui_state(True))
-        self.root.after(0, lambda: self.root.config(cursor=""))
-                
-    def check_operation_in_progress(self):
-        """Check if any operation is in progress"""
-        if self.operation_in_progress:
-            messagebox.showwarning("Warning", "Another operation is in progress. Please wait.")
-            return True
-        return False
+            c.showPage()
+            img.close()
+        
+        c.save()
+        return True
     
-    def request_cancel(self):
-        """Request cancellation of current operation"""
-        with self._lock:
-            self._cancel_requested = True
-        logger.info("Cancellation requested by user")
-
-class EnhancedProgressBar:
-    """Enhanced progress bar with ETA calculation and detailed status"""
-    
-    def __init__(self, parent, root):
-        self.root = root
-        self.frame = ttk.Frame(parent)
-        self.progress = ttk.Progressbar(self.frame, mode='determinate')
-        self.label = tk.Label(self.frame, text="Ready")
-        self.detail_label = tk.Label(self.frame, text="", font=('Helvetica', 9))
-        self.start_time = None
+    @staticmethod
+    def create_pdf_pymupdf(output_path, processed_images, page_size_option="A4",
+                         progress_callback=None, cancel_check=None):
+        """Create PDF using PyMuPDF for better compression"""
+        if not PYMUPDF_AVAILABLE:
+            return False
         
-        self.label.pack(fill='x', padx=5, pady=(0, 2))
-        self.detail_label.pack(fill='x', padx=5, pady=(0, 5))
-        self.progress.pack(fill='x', padx=5)
-        
-    def start(self, total, message="Processing..."):
-        self.progress['maximum'] = total
-        self.progress['value'] = 0
-        self.start_time = time.time()
-        self.label.config(text=message)
-        self.detail_label.config(text="")
-        self.root.update_idletasks()
-        
-    def update(self, current, message="", detail=""):
         try:
-            self.progress['value'] = current
+            doc = fitz.open()
             
-            if self.start_time and current > 0 and current < self.progress['maximum']:
-                elapsed = time.time() - self.start_time
-                rate = current / elapsed
-                remaining = (self.progress['maximum'] - current) / rate
-                eta = time.strftime('%M:%S', time.gmtime(remaining))
-                status_text = f"{message} - ETA: {eta}" if message else f"Processing... ETA: {eta}"
-            else:
-                status_text = message if message else "Processing..."
-                
-            self.label.config(text=status_text)
+            # Page sizes in points
+            page_sizes = {
+                "A4": (595, 842),
+                "Letter": (612, 792),
+                "Legal": (612, 1008)
+            }
             
-            if detail:
-                self.detail_label.config(text=detail)
+            for idx, img_data in enumerate(processed_images):
+                if cancel_check and cancel_check():
+                    doc.close()
+                    return False
                 
-            self.root.update_idletasks()
+                if progress_callback:
+                    progress_callback(idx + 1, len(processed_images), f"Creating page {idx + 1}")
+                
+                # Create page
+                if page_size_option == "Fit":
+                    img = Image.open(io.BytesIO(img_data['data']))
+                    page = doc.new_page(width=img.width, height=img.height)
+                    img.close()
+                else:
+                    width, height = page_sizes.get(page_size_option, (595, 842))
+                    page = doc.new_page(width=width, height=height)
+                
+                # Insert image
+                img_rect = page.rect
+                page.insert_image(img_rect, stream=img_data['data'])
+            
+            # Save with maximum compression
+            doc.save(output_path,
+                    garbage=4,
+                    deflate=True,
+                    clean=True,
+                    deflate_images=True,
+                    deflate_fonts=True)
+            doc.close()
+            return True
+            
         except Exception as e:
-            logger.error(f"Progress update error: {e}")
-            
-    def complete(self, message="Complete"):
-        self.progress['value'] = self.progress['maximum']
-        self.label.config(text=message)
-        self.detail_label.config(text="")
-        self.root.update_idletasks()
+            logger.error(f"PyMuPDF error: {e}")
+            return False
+    
+    @staticmethod
+    def optimize_pdf_size(input_path, output_path):
+        """Further optimize PDF size"""
+        optimized = False
         
-    def error(self, message="Error occurred"):
-        self.label.config(text=message, fg='red')
-        self.detail_label.config(text="")
-        self.root.update_idletasks()
+        # Try PyPDF2
+        if PYPDF2_AVAILABLE:
+            try:
+                reader = PdfReader(input_path)
+                writer = PdfWriter()
+                
+                for page in reader.pages:
+                    page.compress_content_streams()
+                    writer.add_page(page)
+                
+                writer.add_metadata(reader.metadata)
+                writer.compress_identical_objects(remove_use_as_template=True)
+                
+                with open(output_path, 'wb') as f:
+                    writer.write(f)
+                
+                optimized = True
+            except Exception as e:
+                logger.error(f"PyPDF2 optimization error: {e}")
         
-    def reset(self):
-        self.progress['value'] = 0
-        self.label.config(text="Ready", fg='black')
-        self.detail_label.config(text="")
-        self.start_time = None
+        # Try Ghostscript
+        if not optimized:
+            try:
+                gs_cmd = [
+                    'gs' if os.name != 'nt' else 'gswin64c',
+                    '-sDEVICE=pdfwrite',
+                    '-dCompatibilityLevel=1.4',
+                    '-dPDFSETTINGS=/ebook',
+                    '-dNOPAUSE',
+                    '-dQUIET',
+                    '-dBATCH',
+                    f'-sOutputFile={output_path}',
+                    input_path
+                ]
+                
+                subprocess.run(gs_cmd, check=True, capture_output=True)
+                optimized = True
+            except:
+                logger.debug("Ghostscript not available")
         
-    def pack(self, **kwargs):
-        self.frame.pack(**kwargs)
+        return optimized
 
 class ImageToPDFTool(UIStateMixin):
+    """Main application with all production features"""
+    
     def __init__(self, root):
         super().__init__()
         self.root = root
-        self.root.title("Image to PDF Converter Pro")
-        self.root.geometry("950x900")
+        self.root.title("Image to PDF Converter Pro v2.0")
         
-        # Configure grid weights
+        # Make window responsive
         self.root.grid_rowconfigure(0, weight=1)
         self.root.grid_columnconfigure(0, weight=1)
         
-        # Initialize components
-        self.image_processor = ImageProcessor()
+        # Set minimum size
+        self.root.minsize(900, 700)
         
-        # File list
+        # Initialize components
+        self.image_processor = OptimizedImageProcessor()
+        self.pdf_creator = PDFCreator()
+        
+        # File list and data
         self.image_files = []
+        self.current_theme = 'clam'
+        
+        # Load saved preferences
+        self.load_preferences()
         
         # Setup UI
         self.setup_ui()
         self.register_all_ui_elements()
         
-        # Drag and drop variables
-        self.drag_start_index = None
+        # Apply theme
+        self.apply_theme()
         
-        # Apply styles
-        self.apply_styles()
+        # Start resource monitoring
+        self.start_resource_monitoring()
         
-        # Show supported formats
-        self.show_format_support()
+        # Show capabilities
+        self.show_capabilities()
         
-        # Log startup
-        logger.info(f"Image to PDF Converter Pro started - Version 2.0")
-        logger.info(f"Max workers: {Settings.MAX_WORKERS}, Batch size: {Settings.BATCH_SIZE}")
+        # Bind window events
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         
-    def apply_styles(self):
-        style = ttk.Style()
-        style.theme_use('clam')
-        
-        bg_color = '#f0f0f0'
-        self.root.configure(bg=bg_color)
-        
-        style.configure('Title.TLabel', font=('Helvetica', 16, 'bold'))
-        style.configure('Success.TButton', font=('Helvetica', 10, 'bold'))
-        style.configure('Cancel.TButton', font=('Helvetica', 10))
-        style.configure('Warning.TLabel', foreground='orange')
-        style.configure('Error.TLabel', foreground='red')
-
+        logger.info("Application started successfully")
+    
     def setup_ui(self):
+        """Setup responsive UI"""
         # Main container
-        main_frame = ttk.Frame(self.root, padding="10")
-        main_frame.grid(row=0, column=0, sticky="nsew")
+        main_container = ttk.Frame(self.root)
+        main_container.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
         
-        # Configure main frame grid
-        main_frame.grid_rowconfigure(1, weight=1)
-        main_frame.grid_columnconfigure(0, weight=1)
+        # Configure grid weights for responsiveness
+        main_container.grid_rowconfigure(2, weight=1)  # File list area
+        main_container.grid_columnconfigure(0, weight=1)
         
-        # Title and format info
-        title_frame = ttk.Frame(main_frame)
-        title_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        # Top toolbar
+        self.setup_toolbar(main_container)
         
-        ttk.Label(title_frame, text="Image to PDF Converter Pro", style='Title.TLabel').pack(side='left')
+        # Status bar
+        self.setup_status_bar(main_container)
         
-        self.format_label = ttk.Label(title_frame, text="", font=('Helvetica', 9))
-        self.format_label.pack(side='right', padx=20)
+        # File management area
+        self.setup_file_area(main_container)
         
-        # File selection frame
-        file_frame = ttk.Frame(main_frame)
-        file_frame.grid(row=1, column=0, sticky="nsew", pady=10)
+        # Options area
+        self.setup_options_area(main_container)
         
-        # Configure file frame grid
-        file_frame.grid_rowconfigure(0, weight=1)
-        file_frame.grid_columnconfigure(1, weight=1)
+        # Progress area
+        self.setup_progress_area(main_container)
         
-        # Left panel - buttons
-        button_frame = ttk.Frame(file_frame)
-        button_frame.grid(row=0, column=0, sticky="ns", padx=(0, 10))
+        # Action buttons
+        self.setup_action_buttons(main_container)
+    
+    def setup_toolbar(self, parent):
+        """Setup top toolbar"""
+        toolbar_frame = ttk.Frame(parent)
+        toolbar_frame.grid(row=0, column=0, sticky="ew", pady=(0, 5))
+        
+        # Title
+        title_label = ttk.Label(toolbar_frame, text="Image to PDF Converter Pro",
+                               font=('Helvetica', 16, 'bold'))
+        title_label.pack(side='left', padx=10)
+        
+        # Capability indicators
+        self.capability_frame = ttk.Frame(toolbar_frame)
+        self.capability_frame.pack(side='right', padx=10)
+        
+        # Theme selector
+        theme_frame = ttk.Frame(toolbar_frame)
+        theme_frame.pack(side='right', padx=20)
+        
+        ttk.Label(theme_frame, text="Theme:").pack(side='left', padx=5)
+        self.theme_var = tk.StringVar(value=self.current_theme)
+        theme_menu = ttk.Combobox(theme_frame, textvariable=self.theme_var,
+                                  values=Settings.THEME_OPTIONS, width=10, state='readonly')
+        theme_menu.pack(side='left')
+        theme_menu.bind('<<ComboboxSelected>>', lambda e: self.apply_theme())
+    
+    def setup_status_bar(self, parent):
+        """Setup status bar with resource monitoring"""
+        status_frame = ttk.Frame(parent)
+        status_frame.grid(row=1, column=0, sticky="ew", pady=5)
+        
+        # Resource monitors
+        self.cpu_label = ttk.Label(status_frame, text="CPU: 0%", font=('Helvetica', 9))
+        self.cpu_label.pack(side='left', padx=10)
+        
+        self.memory_label = ttk.Label(status_frame, text="Memory: 0 MB", font=('Helvetica', 9))
+        self.memory_label.pack(side='left', padx=10)
+        
+        self.status_label = ttk.Label(status_frame, text="Ready", font=('Helvetica', 9, 'bold'))
+        self.status_label.pack(side='left', padx=20)
+        
+        # File stats
+        self.file_stats_label = ttk.Label(status_frame, text="", font=('Helvetica', 9))
+        self.file_stats_label.pack(side='right', padx=10)
+    
+    def setup_file_area(self, parent):
+        """Setup file management area"""
+        file_container = ttk.Frame(parent)
+        file_container.grid(row=2, column=0, sticky="nsew", pady=5)
+        
+        # Configure grid
+        file_container.grid_rowconfigure(0, weight=1)
+        file_container.grid_columnconfigure(1, weight=1)
+        
+        # Left panel - controls
+        control_panel = ttk.Frame(file_container)
+        control_panel.grid(row=0, column=0, sticky="ns", padx=(0, 5))
         
         # File operations
-        file_ops_frame = ttk.LabelFrame(button_frame, text="File Operations", padding=5)
-        file_ops_frame.pack(fill='x', pady=(0, 5))
+        file_ops = ttk.LabelFrame(control_panel, text="File Operations", padding=5)
+        file_ops.pack(fill='x', pady=(0, 5))
         
-        self.select_images_button = ttk.Button(file_ops_frame, text="Add Images", 
-                                              command=self.select_image_files)
-        self.select_images_button.pack(fill='x', pady=2)
+        self.add_files_btn = ttk.Button(file_ops, text="Add Images",
+                                       command=self.add_images)
+        self.add_files_btn.pack(fill='x', pady=2)
         
-        self.add_folder_button = ttk.Button(file_ops_frame, text="Add Folder", 
-                                           command=self.add_folder_images)
-        self.add_folder_button.pack(fill='x', pady=2)
+        self.add_folder_btn = ttk.Button(file_ops, text="Add Folder",
+                                        command=self.add_folder)
+        self.add_folder_btn.pack(fill='x', pady=2)
         
-        self.clear_images_button = ttk.Button(file_ops_frame, text="Clear All", 
-                                            command=self.clear_image_list)
-        self.clear_images_button.pack(fill='x', pady=2)
+        self.clear_btn = ttk.Button(file_ops, text="Clear All",
+                                   command=self.clear_files)
+        self.clear_btn.pack(fill='x', pady=2)
         
-        self.remove_selected_button = ttk.Button(file_ops_frame, text="Remove Selected", 
-                                               command=self.remove_selected_images)
-        self.remove_selected_button.pack(fill='x', pady=2)
+        self.remove_btn = ttk.Button(file_ops, text="Remove Selected",
+                                    command=self.remove_selected)
+        self.remove_btn.pack(fill='x', pady=2)
         
-        # Order operations
-        order_ops_frame = ttk.LabelFrame(button_frame, text="Change Order", padding=5)
-        order_ops_frame.pack(fill='x', pady=5)
+        # Sorting operations
+        sort_ops = ttk.LabelFrame(control_panel, text="Sort & Order", padding=5)
+        sort_ops.pack(fill='x', pady=5)
         
-        self.move_image_up_button = ttk.Button(order_ops_frame, text="⬆ Move Up", 
-                                             command=self.move_image_up)
-        self.move_image_up_button.pack(fill='x', pady=2)
+        self.move_up_btn = ttk.Button(sort_ops, text="⬆ Move Up",
+                                     command=self.move_up)
+        self.move_up_btn.pack(fill='x', pady=2)
         
-        self.move_image_down_button = ttk.Button(order_ops_frame, text="⬇ Move Down", 
-                                               command=self.move_image_down)
-        self.move_image_down_button.pack(fill='x', pady=2)
+        self.move_down_btn = ttk.Button(sort_ops, text="⬇ Move Down",
+                                       command=self.move_down)
+        self.move_down_btn.pack(fill='x', pady=2)
         
-        self.sort_name_button = ttk.Button(order_ops_frame, text="Sort by Name", 
-                                         command=self.sort_by_name)
-        self.sort_name_button.pack(fill='x', pady=2)
+        ttk.Separator(sort_ops, orient='horizontal').pack(fill='x', pady=5)
         
-        self.sort_date_button = ttk.Button(order_ops_frame, text="Sort by Date", 
-                                         command=self.sort_by_date)
-        self.sort_date_button.pack(fill='x', pady=2)
+        self.sort_name_btn = ttk.Button(sort_ops, text="Sort by Name",
+                                       command=lambda: self.sort_files('name'))
+        self.sort_name_btn.pack(fill='x', pady=2)
         
-        self.reverse_order_button = ttk.Button(order_ops_frame, text="Reverse Order", 
-                                             command=self.reverse_image_order)
-        self.reverse_order_button.pack(fill='x', pady=2)
+        self.sort_date_btn = ttk.Button(sort_ops, text="Sort by Date",
+                                       command=lambda: self.sort_files('date'))
+        self.sort_date_btn.pack(fill='x', pady=2)
         
-        # System info
-        info_frame = ttk.LabelFrame(button_frame, text="System Info", padding=5)
-        info_frame.pack(fill='x', pady=5)
+        self.sort_size_btn = ttk.Button(sort_ops, text="Sort by Size",
+                                       command=lambda: self.sort_files('size'))
+        self.sort_size_btn.pack(fill='x', pady=2)
         
-        self.cpu_label = ttk.Label(info_frame, text="CPU: 0%", font=('Helvetica', 9))
-        self.cpu_label.pack(anchor='w', pady=1)
-        self.memory_label = ttk.Label(info_frame, text="Memory: 0 MB", font=('Helvetica', 9))
-        self.memory_label.pack(anchor='w', pady=1)
-        self.status_label = ttk.Label(info_frame, text="Ready", font=('Helvetica', 9, 'bold'))
-        self.status_label.pack(anchor='w', pady=1)
+        self.reverse_btn = ttk.Button(sort_ops, text="Reverse Order",
+                                     command=self.reverse_order)
+        self.reverse_btn.pack(fill='x', pady=2)
         
-        # Update system info periodically
-        self.update_system_info()
+        # Image operations
+        img_ops = ttk.LabelFrame(control_panel, text="Image Operations", padding=5)
+        img_ops.pack(fill='x', pady=5)
         
-        # Right panel - image list
-        list_frame = ttk.Frame(file_frame)
-        list_frame.grid(row=0, column=1, sticky="nsew")
+        self.preview_btn = ttk.Button(img_ops, text="Preview Selected",
+                                     command=self.preview_selected)
+        self.preview_btn.pack(fill='x', pady=2)
         
-        # Configure list frame grid
-        list_frame.grid_rowconfigure(1, weight=1)
-        list_frame.grid_columnconfigure(0, weight=1)
+        # self.rotate_left_btn = ttk.Button(img_ops, text="↺ Rotate Left",
+        #                                  command=lambda: self.rotate_selected(-90))
+        # self.rotate_left_btn.pack(fill='x', pady=2)
+        
+        # self.rotate_right_btn = ttk.Button(img_ops, text="↻ Rotate Right",
+        #                                   command=lambda: self.rotate_selected(90))
+        # self.rotate_right_btn.pack(fill='x', pady=2)
+        
+        # Right panel - file list
+        list_panel = ttk.Frame(file_container)
+        list_panel.grid(row=0, column=1, sticky="nsew")
+        
+        # Configure grid
+        list_panel.grid_rowconfigure(1, weight=1)
+        list_panel.grid_columnconfigure(0, weight=1)
         
         # List header
-        header_frame = ttk.Frame(list_frame)
+        header_frame = ttk.Frame(list_panel)
         header_frame.grid(row=0, column=0, sticky="ew", pady=(0, 5))
         
-        ttk.Label(header_frame, text="Images (drag to reorder):", font=('Helvetica', 10, 'bold')).pack(side='left')
+        ttk.Label(header_frame, text="Images (drag to reorder):",
+                 font=('Helvetica', 10, 'bold')).pack(side='left')
         
-        # Preview button
-        self.preview_button = ttk.Button(header_frame, text="Preview Selected", 
-                                       command=self.preview_selected_image)
-        self.preview_button.pack(side='right', padx=5)
+        self.select_all_btn = ttk.Button(header_frame, text="Select All",
+                                        command=self.select_all)
+        self.select_all_btn.pack(side='right', padx=5)
         
-        # Listbox with scrollbar
-        listbox_frame = ttk.Frame(list_frame)
-        listbox_frame.grid(row=1, column=0, sticky="nsew")
+        # File list with scrollbar
+        list_frame = ttk.Frame(list_panel)
+        list_frame.grid(row=1, column=0, sticky="nsew")
         
-        listbox_frame.grid_rowconfigure(0, weight=1)
-        listbox_frame.grid_columnconfigure(0, weight=1)
+        # Configure grid
+        list_frame.grid_rowconfigure(0, weight=1)
+        list_frame.grid_columnconfigure(0, weight=1)
         
-        # Create listbox with extended selection
-        self.image_listbox = tk.Listbox(listbox_frame, selectmode='extended')
-        scrollbar = ttk.Scrollbar(listbox_frame, orient="vertical")
+        # Treeview for better file display
+        self.file_tree = ttk.Treeview(list_frame, columns=('size', 'type'),
+                                     show='tree headings', selectmode='extended')
         
-        self.image_listbox.config(yscrollcommand=scrollbar.set)
-        scrollbar.config(command=self.image_listbox.yview)
+        # Configure columns
+        self.file_tree.heading('#0', text='Filename')
+        self.file_tree.heading('size', text='Size')
+        self.file_tree.heading('type', text='Type')
         
-        self.image_listbox.grid(row=0, column=0, sticky="nsew")
-        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.file_tree.column('#0', width=300)
+        self.file_tree.column('size', width=100)
+        self.file_tree.column('type', width=100)
+        
+        # Scrollbars
+        v_scroll = ttk.Scrollbar(list_frame, orient='vertical', command=self.file_tree.yview)
+        h_scroll = ttk.Scrollbar(list_frame, orient='horizontal', command=self.file_tree.xview)
+        
+        self.file_tree.configure(yscrollcommand=v_scroll.set, xscrollcommand=h_scroll.set)
+        
+        # Grid widgets
+        self.file_tree.grid(row=0, column=0, sticky="nsew")
+        v_scroll.grid(row=0, column=1, sticky="ns")
+        h_scroll.grid(row=1, column=0, sticky="ew")
         
         # Bind events
-        self.bind_drag_drop_events()
-        self.image_listbox.bind('<Double-Button-1>', lambda e: self.preview_selected_image())
-        self.image_listbox.bind('<Delete>', lambda e: self.remove_selected_images())
+        self.file_tree.bind('<Double-Button-1>', lambda e: self.preview_selected())
+        self.file_tree.bind('<Delete>', lambda e: self.remove_selected())
+        self.file_tree.bind('<Control-a>', lambda e: self.select_all())
         
-        # Image count and stats
-        self.stats_label = ttk.Label(list_frame, text="No images loaded", font=('Helvetica', 9))
-        self.stats_label.grid(row=2, column=0, pady=(5, 0), sticky="w")
+        # Setup drag and drop
+        self.setup_drag_drop()
         
-        # Options frame
-        options_frame = ttk.LabelFrame(main_frame, text="Conversion Options", padding=10)
-        options_frame.grid(row=2, column=0, sticky="ew", pady=10)
+        # For backward compatibility
+        self.image_listbox = self.file_tree
+    
+    def setup_options_area(self, parent):
+        """Setup conversion options"""
+        options_container = ttk.LabelFrame(parent, text="Conversion Options", padding=10)
+        options_container.grid(row=3, column=0, sticky="ew", pady=5)
         
-        # Compression settings
-        compress_frame = ttk.Frame(options_frame)
-        compress_frame.pack(fill='x', pady=(0, 10))
+        # Configure grid
+        options_container.grid_columnconfigure(0, weight=1)
+        options_container.grid_columnconfigure(1, weight=1)
         
-        self.compress_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(compress_frame, text="Compress images", 
-                       variable=self.compress_var,
-                       command=self.toggle_compression).pack(side='left')
+        # Left side - compression
+        left_frame = ttk.Frame(options_container)
+        left_frame.grid(row=0, column=0, sticky="ew", padx=(0, 10))
         
-        ttk.Label(compress_frame, text="Quality:").pack(side='left', padx=(20, 5))
+        # Compression preset
+        preset_frame = ttk.Frame(left_frame)
+        preset_frame.pack(fill='x', pady=5)
+        
+        ttk.Label(preset_frame, text="PDF Quality:").pack(side='left')
+        
+        self.compression_var = tk.StringVar(value="Medium")
+        compression_menu = ttk.Combobox(preset_frame, textvariable=self.compression_var,
+                                       width=20, state='readonly')
+        compression_menu['values'] = list(Settings.COMPRESSION_PRESETS.keys())
+        compression_menu.pack(side='left', padx=10)
+        compression_menu.bind('<<ComboboxSelected>>', self.on_compression_change)
+        
+        # Compression details
+        self.compression_info = ttk.Label(left_frame, text="", font=('Helvetica', 9))
+        self.compression_info.pack(pady=5)
+        
+        # Custom quality (disabled by default)
+        custom_frame = ttk.Frame(left_frame)
+        custom_frame.pack(fill='x', pady=5)
+        
+        self.custom_quality_var = tk.BooleanVar(value=False)
+        self.custom_check = ttk.Checkbutton(custom_frame, text="Custom quality:",
+                                           variable=self.custom_quality_var,
+                                           command=self.toggle_custom_quality)
+        self.custom_check.pack(side='left')
+        
         self.quality_var = tk.IntVar(value=85)
-        self.quality_scale = ttk.Scale(compress_frame, from_=10, to=100, 
-                                      variable=self.quality_var, orient='horizontal', length=200)
-        self.quality_scale.pack(side='left', padx=5)
-        self.quality_label = ttk.Label(compress_frame, text="85%")
+        self.quality_scale = ttk.Scale(custom_frame, from_=10, to=100,
+                                      variable=self.quality_var,
+                                      orient='horizontal', length=150)
+        self.quality_scale.pack(side='left', padx=10)
+        self.quality_scale.config(state='disabled')
+        
+        self.quality_label = ttk.Label(custom_frame, text="85%")
         self.quality_label.pack(side='left')
         
         self.quality_scale.config(command=lambda v: self.quality_label.config(text=f"{int(float(v))}%"))
         
-        # Page settings
-        page_frame = ttk.Frame(options_frame)
-        page_frame.pack(fill='x', pady=(0, 10))
+        # Right side - page settings
+        right_frame = ttk.Frame(options_container)
+        right_frame.grid(row=0, column=1, sticky="ew")
         
-        ttk.Label(page_frame, text="Page Size:").pack(side='left', padx=(0, 10))
+        # Page size
+        page_frame = ttk.Frame(right_frame)
+        page_frame.pack(fill='x', pady=5)
+        
+        ttk.Label(page_frame, text="Page Size:").pack(side='left')
+        
         self.page_size_var = tk.StringVar(value="A4")
-        ttk.Radiobutton(page_frame, text="A4", variable=self.page_size_var, 
-                       value="A4").pack(side='left', padx=5)
-        ttk.Radiobutton(page_frame, text="Letter", variable=self.page_size_var, 
-                       value="Letter").pack(side='left', padx=5)
-        ttk.Radiobutton(page_frame, text="Fit to Image", variable=self.page_size_var, 
-                       value="Fit").pack(side='left', padx=5)
+        sizes = ["A4", "Letter", "Legal", "Fit to Image"]
+        
+        for size in sizes:
+            ttk.Radiobutton(page_frame, text=size, variable=self.page_size_var,
+                           value=size if size != "Fit to Image" else "Fit").pack(side='left', padx=5)
         
         # Advanced options
-        advanced_frame = ttk.Frame(options_frame)
-        advanced_frame.pack(fill='x')
+        advanced_frame = ttk.Frame(right_frame)
+        advanced_frame.pack(fill='x', pady=10)
         
-        self.preserve_exif_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(advanced_frame, text="Auto-rotate (EXIF)", 
-                       variable=self.preserve_exif_var).pack(side='left', padx=(0, 20))
+        self.use_pymupdf_var = tk.BooleanVar(value=PYMUPDF_AVAILABLE)
+        if PYMUPDF_AVAILABLE:
+            ttk.Checkbutton(advanced_frame, text="Enhanced compression",
+                           variable=self.use_pymupdf_var).pack(side='left', padx=5)
         
         self.optimize_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(advanced_frame, text="Optimize for web", 
-                       variable=self.optimize_var).pack(side='left')
+        ttk.Checkbutton(advanced_frame, text="Optimize PDF size",
+                       variable=self.optimize_var).pack(side='left', padx=5)
         
-        # Progress bar
-        self.img_progress = EnhancedProgressBar(main_frame, self.root)
-        self.img_progress.frame.grid(row=3, column=0, sticky="ew", pady=10)
+        self.auto_rotate_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(advanced_frame, text="Auto-rotate (EXIF)",
+                       variable=self.auto_rotate_var).pack(side='left', padx=5)
         
-        # Action buttons
-        button_container = ttk.Frame(main_frame)
-        button_container.grid(row=4, column=0, pady=(0, 10))
+        # Update compression info
+        self.on_compression_change()
+    
+    def setup_progress_area(self, parent):
+        """Setup progress area"""
+        progress_container = ttk.Frame(parent)
+        progress_container.grid(row=4, column=0, sticky="ew", pady=5)
         
-        self.convert_to_pdf_button = ttk.Button(
-            button_container, 
-            text="Convert to PDF", 
-            command=self.images_to_pdf_thread, 
-            style='Success.TButton'
-        )
-        self.convert_to_pdf_button.pack(side='left', padx=5)
+        self.progress_bar = EnhancedProgressBar(progress_container, self.root)
+        self.progress_bar.pack(fill='x')
+    
+    def setup_action_buttons(self, parent):
+        """Setup action buttons"""
+        button_container = ttk.Frame(parent)
+        button_container.grid(row=5, column=0, pady=10)
         
-        self.cancel_button = ttk.Button(
-            button_container,
-            text="Cancel",
-            command=self.request_cancel,
-            style='Cancel.TButton',
-            state='disabled'
-        )
+        self.convert_btn = ttk.Button(button_container, text="Convert to PDF",
+                                     command=self.start_conversion,
+                                     style='Accent.TButton')
+        self.convert_btn.pack(side='left', padx=5)
+        
+        self.pause_button = ttk.Button(button_container, text="Pause",
+                                      command=self.toggle_pause,
+                                      state='disabled')
+        self.pause_button.pack(side='left', padx=5)
+        
+        self.cancel_button = ttk.Button(button_container, text="Cancel",
+                                       command=self.request_cancel,
+                                       state='disabled')
         self.cancel_button.pack(side='left', padx=5)
         
-        # View log button
-        self.view_log_button = ttk.Button(
-            button_container,
-            text="View Log",
-            command=self.view_log_file
-        )
-        self.view_log_button.pack(side='left', padx=5)
+        ttk.Separator(button_container, orient='vertical').pack(side='left', fill='y', padx=10)
         
-    def show_format_support(self):
-        """Show supported formats"""
-        formats = []
-        if HEIF_SUPPORT:
-            formats.append("HEIF/HEIC ✓")
-        else:
-            formats.append("HEIF/HEIC ✗")
-            
-        self.format_label.config(text=f"Supported: JPG, PNG, BMP, GIF, TIFF, WebP, {', '.join(formats)}")
+        # ttk.Button(button_container, text="Settings",
+        #           command=self.show_settings).pack(side='left', padx=5)
         
-    def toggle_compression(self):
-        """Toggle compression settings"""
-        if self.compress_var.get():
-            self.quality_scale.config(state='normal')
-        else:
-            self.quality_scale.config(state='disabled')
+        ttk.Button(button_container, text="View Log",
+                  command=self.view_log).pack(side='left', padx=5)
+        
+        ttk.Button(button_container, text="Help",
+                  command=self.show_help).pack(side='left', padx=5)
     
-    def update_system_info(self):
-        """Update system resource information"""
+    def apply_theme(self):
+        """Apply selected theme"""
         try:
-            cpu_usage = ResourceMonitor.get_cpu_usage()
-            memory_usage = ResourceMonitor.get_memory_usage()
+            style = ttk.Style()
+            theme = self.theme_var.get()
+            style.theme_use(theme)
             
-            # Color code based on usage
-            cpu_color = 'black' if cpu_usage < 70 else 'orange' if cpu_usage < 90 else 'red'
-            mem_color = 'black' if memory_usage < 800 else 'orange' if memory_usage < 1000 else 'red'
+            # Custom style configurations
+            style.configure('Accent.TButton', font=('Helvetica', 10, 'bold'))
             
-            self.cpu_label.config(text=f"CPU: {cpu_usage:.1f}%", foreground=cpu_color)
-            self.memory_label.config(text=f"Memory: {memory_usage:.0f} MB", foreground=mem_color)
+            # Apply colors based on theme
+            if theme == 'clam':
+                self.root.configure(bg='#f0f0f0')
             
-            # Update status
-            if self.operation_in_progress:
-                self.status_label.config(text="Processing...", foreground='blue')
-            else:
-                self.status_label.config(text="Ready", foreground='green')
+            self.current_theme = theme
+            self.save_preferences()
             
-            # Schedule next update
-            self.root.after(1000, self.update_system_info)
         except Exception as e:
-            logger.debug(f"System info update error: {e}")
+            logger.error(f"Error applying theme: {e}")
+    
+    def show_capabilities(self):
+        """Show available features in toolbar"""
+        features = []
         
-    def register_all_ui_elements(self):
-        """Register all UI elements for state management"""
-        ui_elements = [
-            self.select_images_button, self.add_folder_button,
-            self.clear_images_button, self.remove_selected_button,
-            self.move_image_up_button, self.move_image_down_button,
-            self.sort_name_button, self.sort_date_button,
-            self.reverse_order_button, self.convert_to_pdf_button,
-            self.preview_button
-        ]
+        if PYMUPDF_AVAILABLE:
+            label = ttk.Label(self.capability_frame, text="✓ Enhanced Compression",
+                            font=('Helvetica', 9), foreground='green')
+            label.pack(side='left', padx=5)
         
-        for element in ui_elements:
-            self.register_ui_element(element)
-
-    def select_image_files(self):
-        """Select and add image files"""
-        if self.operation_in_progress:
-            return
-            
+        if PYPDF2_AVAILABLE:
+            label = ttk.Label(self.capability_frame, text="✓ PDF Optimization",
+                            font=('Helvetica', 9), foreground='green')
+            label.pack(side='left', padx=5)
+        
+        if HEIF_SUPPORT:
+            label = ttk.Label(self.capability_frame, text="✓ HEIF/HEIC Support",
+                            font=('Helvetica', 9), foreground='green')
+            label.pack(side='left', padx=5)
+    
+    def start_resource_monitoring(self):
+        """Start monitoring system resources"""
+        self.update_resource_display()
+    
+    def update_resource_display(self):
+        """Update resource display"""
         try:
-            # Build file types string
-            extensions = list(Settings.SUPPORTED_FORMATS)
-            file_types_str = " ".join([f"*{ext}" for ext in extensions])
+            status = self.resource_monitor.get_resource_status()
             
-            files = filedialog.askopenfilenames(
-                title="Select image files",
-                filetypes=[
-                    ("All Images", file_types_str),
-                    ("JPEG files", "*.jpg *.jpeg"),
-                    ("PNG files", "*.png"),
-                    ("HEIF files", "*.heic *.heif"),
-                    ("All files", "*.*")
-                ]
+            # Update labels with color coding
+            cpu_color = 'black'
+            if status['cpu'] > Settings.MAX_CPU_PERCENT:
+                cpu_color = 'orange'
+            if status['cpu'] > Settings.CRITICAL_CPU_PERCENT:
+                cpu_color = 'red'
+            
+            mem_color = 'black'
+            if status['memory_mb'] > Settings.MAX_MEMORY_MB:
+                mem_color = 'orange'
+            if status['memory_mb'] > Settings.CRITICAL_MEMORY_MB:
+                mem_color = 'red'
+            
+            self.cpu_label.config(
+                text=f"CPU: {status['cpu']:.1f}%",
+                foreground=cpu_color
             )
             
-            self.add_images(files)
+            self.memory_label.config(
+                text=f"Memory: {status['memory_mb']:.0f} MB ({status['memory_percent']:.1f}%)",
+                foreground=mem_color
+            )
+            
+            # Update status
+            if status['status'] == 'Critical':
+                self.status_label.config(text="⚠️ High Resource Usage", foreground='red')
+            elif status['status'] == 'High':
+                self.status_label.config(text="⚠️ Moderate Load", foreground='orange')
+            elif self.operation_in_progress:
+                self.status_label.config(text="🔄 Processing...", foreground='blue')
+            else:
+                self.status_label.config(text="✓ Ready", foreground='green')
+            
+            # Check for alerts
+            if self.operation_in_progress:
+                self.check_resource_alert()
             
         except Exception as e:
-            error_msg = f"Error selecting files: {str(e)}"
-            logger.error(error_msg)
-            messagebox.showerror("Error", error_msg)
+            logger.debug(f"Resource monitoring error: {e}")
+        
+        # Schedule next update
+        self.root.after(1000, self.update_resource_display)
     
-    def add_folder_images(self):
-        """Add all images from a folder"""
+    def register_all_ui_elements(self):
+        """Register UI elements for state management"""
+        # elements = [
+        #     self.add_files_btn, self.add_folder_btn, self.clear_btn, self.remove_btn,
+        #     self.move_up_btn, self.move_down_btn, self.sort_name_btn, self.sort_date_btn,
+        #     self.sort_size_btn, self.reverse_btn, self.preview_btn, self.rotate_left_btn,
+        #     self.rotate_right_btn, self.select_all_btn, self.convert_btn
+        # ]
+        #removing rotate buttons until functionality is added
+        elements = [
+            self.add_files_btn, self.add_folder_btn, self.clear_btn, self.remove_btn,
+            self.move_up_btn, self.move_down_btn, self.sort_name_btn, self.sort_date_btn,
+            self.sort_size_btn, self.reverse_btn, self.preview_btn, self.select_all_btn, self.convert_btn
+        ]
+        
+        for element in elements:
+            self.register_ui_element(element)
+    
+    def setup_drag_drop(self):
+        """Setup drag and drop for file reordering"""
+        self.drag_start_index = None
+        self.file_tree.bind('<Button-1>', self.on_drag_start)
+        self.file_tree.bind('<B1-Motion>', self.on_drag_motion)
+        self.file_tree.bind('<ButtonRelease-1>', self.on_drag_release)
+    
+    def on_drag_start(self, event):
+        """Start drag operation"""
+        if not self.drag_drop_enabled or self.operation_in_progress:
+            return
+        
+        item = self.file_tree.identify_row(event.y)
+        if item:
+            self.drag_start_index = self.file_tree.index(item)
+    
+    def on_drag_motion(self, event):
+        """Handle drag motion"""
+        if self.drag_start_index is None:
+            return
+        
+        self.file_tree.config(cursor="hand2")
+    
+    def on_drag_release(self, event):
+        """Handle drag release"""
+        if self.drag_start_index is None:
+            return
+        
+        self.file_tree.config(cursor="")
+        
+        item = self.file_tree.identify_row(event.y)
+        if item:
+            drop_index = self.file_tree.index(item)
+            
+            if drop_index != self.drag_start_index:
+                # Reorder files
+                file = self.image_files.pop(self.drag_start_index)
+                self.image_files.insert(drop_index, file)
+                
+                # Refresh display
+                self.refresh_file_list()
+        
+        self.drag_start_index = None
+    
+    # Dummy implementations for backward compatibility
+    def on_image_click(self, event):
+        self.on_drag_start(event)
+    
+    def on_image_drag(self, event):
+        self.on_drag_motion(event)
+    
+    def on_image_drop(self, event):
+        self.on_drag_release(event)
+    
+    def add_images(self):
+        """Add image files"""
         if self.operation_in_progress:
             return
-            
-        try:
-            folder_path = filedialog.askdirectory(title="Select folder containing images")
-            if not folder_path:
-                return
-            
-            # Find all image files
-            image_files = []
-            for root, dirs, files in os.walk(folder_path):
-                for file in files:
-                    if os.path.splitext(file)[1].lower() in Settings.SUPPORTED_FORMATS:
-                        image_files.append(os.path.join(root, file))
-                # Don't recurse into subdirectories
-                break
-            
-            if image_files:
-                self.add_images(image_files)
-                messagebox.showinfo("Success", f"Added {len(image_files)} images from folder")
-            else:
-                messagebox.showinfo("Info", "No supported image files found in folder")
-                
-        except Exception as e:
-            error_msg = f"Error adding folder: {str(e)}"
-            logger.error(error_msg)
-            messagebox.showerror("Error", error_msg)
+        
+        files = filedialog.askopenfilenames(
+            title="Select images",
+            filetypes=[
+                ("All Images", "*.jpg *.jpeg *.png *.bmp *.gif *.tiff *.webp *.heic *.heif"),
+                ("JPEG", "*.jpg *.jpeg"),
+                ("PNG", "*.png"),
+                ("All files", "*.*")
+            ]
+        )
+        
+        self.add_files_to_list(files)
     
-    def add_images(self, files):
-        """Add images to the list with validation"""
-        added_count = 0
-        skipped_count = 0
+    def add_folder(self):
+        """Add all images from folder"""
+        if self.operation_in_progress:
+            return
+        
+        folder = filedialog.askdirectory(title="Select folder containing images")
+        if folder:
+            # Find all images
+            files = []
+            for ext in Settings.SUPPORTED_FORMATS:
+                files.extend(Path(folder).glob(f"*{ext}"))
+                files.extend(Path(folder).glob(f"*{ext.upper()}"))
+            
+            # Convert to strings and add
+            file_paths = [str(f) for f in files]
+            self.add_files_to_list(file_paths)
+    
+    def add_files_to_list(self, files):
+        """Add files to the list with validation"""
+        added = 0
         errors = []
         
         for file in files:
+            # if file in self.image_files:
+            #     continue
+            
             try:
-                # Skip if already in list
-                # if file in self.image_files:
-                #     skipped_count += 1
-                #     continue
-                
                 # Validate file
                 if not os.path.exists(file):
-                    errors.append(f"{os.path.basename(file)}: File not found")
+                    errors.append((file, "File not found"))
                     continue
                 
-                # Check file size
-                file_size_mb = os.path.getsize(file) / 1024 / 1024
-                if file_size_mb > Settings.MAX_FILE_SIZE_MB:
-                    errors.append(f"{os.path.basename(file)}: Too large ({file_size_mb:.1f}MB)")
-                    continue
-                
-                # Try to get image info
-                info = self.image_processor.get_image_info(file)
-                if not info:
-                    errors.append(f"{os.path.basename(file)}: Invalid image")
+                # Check size
+                size_mb = os.path.getsize(file) / (1024 * 1024)
+                if size_mb > Settings.MAX_FILE_SIZE_MB:
+                    errors.append((file, f"File too large ({size_mb:.1f} MB)"))
                     continue
                 
                 # Add to list
                 self.image_files.append(file)
-                display_text = f"{os.path.basename(file)} ({info['size'][0]}x{info['size'][1]})"
-                self.image_listbox.insert(tk.END, display_text)
-                added_count += 1
+                added += 1
                 
             except Exception as e:
-                errors.append(f"{os.path.basename(file)}: {str(e)}")
+                errors.append((file, str(e)))
         
-        # Update stats
-        self.update_image_stats()
+        # Refresh display
+        self.refresh_file_list()
         
         # Show results
         if errors:
             error_msg = "Some files could not be added:\n\n"
-            for error in errors[:10]:  # Show first 10 errors
-                error_msg += f"• {error}\n"
-            if len(errors) > 10:
-                error_msg += f"\n... and {len(errors) - 10} more"
+            for file, error in errors[:5]:
+                error_msg += f"• {os.path.basename(file)}: {error}\n"
+            if len(errors) > 5:
+                error_msg += f"\n... and {len(errors) - 5} more"
             messagebox.showwarning("Warning", error_msg)
         
-        logger.info(f"Added {added_count} images, skipped {skipped_count}, errors {len(errors)}")
-
-    def clear_image_list(self):
-        """Clear all images"""
+        if added > 0:
+            logger.info(f"Added {added} images")
+    
+    def refresh_file_list(self):
+        """Refresh the file list display"""
+        # Clear tree
+        for item in self.file_tree.get_children():
+            self.file_tree.delete(item)
+        
+        # Add files
+        total_size = 0
+        for file in self.image_files:
+            try:
+                size = os.path.getsize(file)
+                total_size += size
+                
+                # Format size
+                if size < 1024:
+                    size_str = f"{size} B"
+                elif size < 1024 * 1024:
+                    size_str = f"{size/1024:.1f} KB"
+                else:
+                    size_str = f"{size/(1024*1024):.1f} MB"
+                
+                # Get type
+                ext = os.path.splitext(file)[1].upper()
+                if ext.startswith('.'):
+                    ext = ext[1:]
+                
+                # Insert item
+                self.file_tree.insert('', 'end', text=os.path.basename(file),
+                                     values=(size_str, ext))
+                
+            except Exception as e:
+                logger.error(f"Error adding file to list: {e}")
+        
+        # Update stats
+        self.update_file_stats(total_size)
+    
+    def update_file_stats(self, total_size=None):
+        """Update file statistics"""
+        count = len(self.image_files)
+        
+        if count == 0:
+            self.file_stats_label.config(text="")
+            return
+        
+        if total_size is None:
+            total_size = sum(os.path.getsize(f) for f in self.image_files if os.path.exists(f))
+        
+        total_mb = total_size / (1024 * 1024)
+        
+        # Estimate output size
+        preset = self.compression_var.get()
+        settings = Settings.COMPRESSION_PRESETS.get(preset, Settings.COMPRESSION_PRESETS['Medium'])
+        quality = settings['quality']
+        
+        # Estimation based on quality
+        compression_ratios = {
+            95: 0.4,
+            85: 0.25,
+            75: 0.15,
+            60: 0.1,
+            40: 0.06
+        }
+        
+        ratio = compression_ratios.get(quality, 0.2)
+        estimated_mb = total_mb * ratio
+        
+        stats_text = f"Files: {count} | Input: {total_mb:.1f} MB | Est. PDF: ~{estimated_mb:.1f} MB"
+        self.file_stats_label.config(text=stats_text)
+    
+    def clear_files(self):
+        """Clear all files"""
         if self.operation_in_progress:
             return
-            
-        if self.image_files and messagebox.askyesno("Confirm", "Clear all images from the list?"):
+        
+        if self.image_files and messagebox.askyesno("Confirm", "Clear all files?"):
             self.image_files.clear()
-            self.image_listbox.delete(0, tk.END)
-            self.img_progress.reset()
-            self.update_image_stats()
-            logger.info("Cleared all images")
-
-    def remove_selected_images(self):
-        """Remove selected images"""
+            self.refresh_file_list()
+            self.progress_bar.reset()
+    
+    def remove_selected(self):
+        """Remove selected files"""
         if self.operation_in_progress:
             return
-            
-        selected_indices = list(self.image_listbox.curselection())
-        if not selected_indices:
+        
+        selected = self.file_tree.selection()
+        if not selected:
             return
+        
+        # Get indices
+        indices = [self.file_tree.index(item) for item in selected]
         
         # Remove in reverse order
-        for idx in reversed(selected_indices):
-            removed_file = self.image_files[idx]
+        for idx in sorted(indices, reverse=True):
             del self.image_files[idx]
-            self.image_listbox.delete(idx)
-            logger.debug(f"Removed {os.path.basename(removed_file)}")
         
-        self.update_image_stats()
-
-    def move_image_up(self):
-        """Move selected image up"""
+        self.refresh_file_list()
+    
+    def move_up(self):
+        """Move selected file up"""
         if self.operation_in_progress:
             return
-            
-        selected = self.image_listbox.curselection()
-        if not selected or selected[0] == 0:
+        
+        selected = self.file_tree.selection()
+        if not selected:
             return
         
-        idx = selected[0]
-        # Swap in both lists
-        self.image_files[idx], self.image_files[idx-1] = self.image_files[idx-1], self.image_files[idx]
-        
-        # Update listbox
-        item = self.image_listbox.get(idx)
-        self.image_listbox.delete(idx)
-        self.image_listbox.insert(idx-1, item)
-        self.image_listbox.selection_set(idx-1)
-        self.image_listbox.see(idx-1)
-
-    def move_image_down(self):
-        """Move selected image down"""
+        idx = self.file_tree.index(selected[0])
+        if idx > 0:
+            self.image_files[idx], self.image_files[idx-1] = self.image_files[idx-1], self.image_files[idx]
+            self.refresh_file_list()
+            
+            # Restore selection
+            new_item = self.file_tree.get_children()[idx-1]
+            self.file_tree.selection_set(new_item)
+            self.file_tree.see(new_item)
+    
+    def move_down(self):
+        """Move selected file down"""
         if self.operation_in_progress:
             return
-            
-        selected = self.image_listbox.curselection()
-        if not selected or selected[0] >= len(self.image_files) - 1:
+        
+        selected = self.file_tree.selection()
+        if not selected:
             return
         
-        idx = selected[0]
-        # Swap in both lists
-        self.image_files[idx], self.image_files[idx+1] = self.image_files[idx+1], self.image_files[idx]
-        
-        # Update listbox
-        item = self.image_listbox.get(idx)
-        self.image_listbox.delete(idx)
-        self.image_listbox.insert(idx+1, item)
-        self.image_listbox.selection_set(idx+1)
-        self.image_listbox.see(idx+1)
-
-    def sort_by_name(self):
-        """Sort images by filename"""
+        idx = self.file_tree.index(selected[0])
+        if idx < len(self.image_files) - 1:
+            self.image_files[idx], self.image_files[idx+1] = self.image_files[idx+1], self.image_files[idx]
+            self.refresh_file_list()
+            
+            # Restore selection
+            new_item = self.file_tree.get_children()[idx+1]
+            self.file_tree.selection_set(new_item)
+            self.file_tree.see(new_item)
+    
+    def sort_files(self, sort_type):
+        """Sort files by specified type"""
         if self.operation_in_progress or not self.image_files:
             return
         
-        # Create sorted pairs
-        sorted_pairs = sorted(zip(self.image_files, range(len(self.image_files))), 
-                            key=lambda x: os.path.basename(x[0]).lower())
+        if sort_type == 'name':
+            self.image_files.sort(key=lambda x: os.path.basename(x).lower())
+        elif sort_type == 'date':
+            self.image_files.sort(key=lambda x: os.path.getmtime(x))
+        elif sort_type == 'size':
+            self.image_files.sort(key=lambda x: os.path.getsize(x))
         
-        # Update lists
-        self.image_files = [pair[0] for pair in sorted_pairs]
-        
-        # Rebuild listbox
-        self.refresh_image_listbox()
-        logger.info("Sorted images by name")
-
-    def sort_by_date(self):
-        """Sort images by modification date"""
-        if self.operation_in_progress or not self.image_files:
-            return
-        
-        # Create sorted pairs
-        sorted_pairs = sorted(zip(self.image_files, range(len(self.image_files))), 
-                            key=lambda x: os.path.getmtime(x[0]))
-        
-        # Update lists
-        self.image_files = [pair[0] for pair in sorted_pairs]
-        
-        # Rebuild listbox
-        self.refresh_image_listbox()
-        logger.info("Sorted images by date")
-
-    def reverse_image_order(self):
-        """Reverse image order"""
+        self.refresh_file_list()
+        logger.info(f"Sorted files by {sort_type}")
+    
+    def reverse_order(self):
+        """Reverse file order"""
         if self.operation_in_progress or not self.image_files:
             return
         
         self.image_files.reverse()
-        self.refresh_image_listbox()
-        logger.info("Reversed image order")
-
-    def refresh_image_listbox(self):
-        """Refresh the listbox with current file order"""
-        self.image_listbox.delete(0, tk.END)
-        
-        for file in self.image_files:
-            try:
-                info = self.image_processor.get_image_info(file)
-                if info:
-                    display_text = f"{os.path.basename(file)} ({info['size'][0]}x{info['size'][1]})"
-                else:
-                    display_text = os.path.basename(file)
-                self.image_listbox.insert(tk.END, display_text)
-            except:
-                self.image_listbox.insert(tk.END, os.path.basename(file))
-
-    def update_image_stats(self):
-        """Update image statistics display"""
-        count = len(self.image_files)
-        
-        if count == 0:
-            self.stats_label.config(text="No images loaded")
-            return
-        
-        # Calculate total size
-        total_size = 0
-        for file in self.image_files:
-            try:
-                total_size += os.path.getsize(file)
-            except:
-                pass
-        
-        total_size_mb = total_size / (1024 * 1024)
-        
-        # Estimate output size
-        if self.compress_var.get():
-            quality = self.quality_var.get()
-            estimated_size_mb = total_size_mb * (quality / 100) * 0.3  # Rough estimate
-        else:
-            estimated_size_mb = total_size_mb * 0.8
-        
-        stats_text = f"Images: {count} | Total size: {total_size_mb:.1f} MB | Est. PDF: ~{estimated_size_mb:.1f} MB"
-        self.stats_label.config(text=stats_text)
-
-    def preview_selected_image(self):
-        """Preview selected image with info"""
-        selected = self.image_listbox.curselection()
+        self.refresh_file_list()
+    
+    def select_all(self):
+        """Select all files"""
+        for item in self.file_tree.get_children():
+            self.file_tree.selection_add(item)
+    
+    def preview_selected(self):
+        """Preview selected image"""
+        selected = self.file_tree.selection()
         if not selected:
             messagebox.showinfo("Info", "Please select an image to preview")
             return
         
-        idx = selected[0]
+        idx = self.file_tree.index(selected[0])
         image_path = self.image_files[idx]
         
-        # Create preview window
-        preview_window = tk.Toplevel(self.root)
-        preview_window.title(f"Preview: {os.path.basename(image_path)}")
-        preview_window.geometry("800x700")
-        
-        try:
-            # Get image info
-            info = self.image_processor.get_image_info(image_path)
-            if not info:
-                raise Exception("Could not read image")
-            
-            # Info frame
-            info_frame = ttk.Frame(preview_window, padding=10)
-            info_frame.pack(fill='x')
-            
-            # Display detailed info
-            info_text = f"File: {os.path.basename(image_path)}\n"
-            info_text += f"Format: {info.get('format', 'Unknown')}\n"
-            info_text += f"Size: {info['size'][0]} x {info['size'][1]} pixels\n"
-            info_text += f"Mode: {info.get('mode', 'Unknown')}\n"
-            info_text += f"File size: {os.path.getsize(image_path) / 1024:.1f} KB"
-            
-            # Check for EXIF data
-            if info.get('exif'):
-                exif_info = []
-                important_tags = ['Make', 'Model', 'DateTime', 'Orientation']
-                for tag in important_tags:
-                    if tag in info['exif']:
-                        exif_info.append(f"{tag}: {info['exif'][tag]}")
-                if exif_info:
-                    info_text += f"\n\nEXIF Data:\n" + "\n".join(exif_info)
-            
-            info_label = ttk.Label(info_frame, text=info_text, justify='left')
-            info_label.pack(anchor='w')
-            
-            # Image display frame
-            img_frame = ttk.Frame(preview_window)
-            img_frame.pack(fill='both', expand=True, padx=10, pady=5)
-            
-            # Load and display image
-            with Image.open(image_path) as img:
-                # Apply EXIF rotation
-                img = self.image_processor.handle_exif_orientation(img)
-                
-                # Resize for display
-                display_size = (750, 450)
-                img.thumbnail(display_size, Image.Resampling.LANCZOS)
-                
-                # Convert to PhotoImage
-                photo = ImageTk.PhotoImage(img)
-                
-                # Display
-                img_label = ttk.Label(img_frame, image=photo)
-                img_label.image = photo  # Keep reference
-                img_label.pack(expand=True)
-            
-            # Close button
-            ttk.Button(preview_window, text="Close", 
-                      command=preview_window.destroy).pack(pady=10)
-            
-        except Exception as e:
-            messagebox.showerror("Error", f"Could not preview image:\n{str(e)}")
-            preview_window.destroy()
-            logger.error(f"Preview error for {image_path}: {e}")
-
-    # Drag and drop functionality
-    def on_image_click(self, event):
-        """Handle mouse click on image list"""
-        if not self.drag_drop_enabled or self.operation_in_progress:
-            return
-            
-        self.drag_start_index = self.image_listbox.nearest(event.y)
-
-    def on_image_drag(self, event):
-        """Handle dragging of image"""
-        if not self.drag_drop_enabled or self.operation_in_progress or self.drag_start_index is None:
+        # Show preview dialog
+        ImagePreviewDialog(self.root, image_path)
+    
+    def rotate_selected(self, angle):
+        """Rotate selected images (temporarily for preview)"""
+        selected = self.file_tree.selection()
+        if not selected:
+            messagebox.showinfo("Info", "Please select images to rotate")
             return
         
-        # Visual feedback
-        self.image_listbox.config(cursor="hand2")
+        # Note: This is a placeholder - actual rotation would be applied during processing
+        count = len(selected)
+        messagebox.showinfo("Info", f"Rotation of {angle}° will be applied to {count} image(s) during conversion")
+    
+    def on_compression_change(self, event=None):
+        """Handle compression preset change"""
+        preset = self.compression_var.get()
+        settings = Settings.COMPRESSION_PRESETS.get(preset, Settings.COMPRESSION_PRESETS['Medium'])
         
-        # Show drag line
-        current_index = self.image_listbox.nearest(event.y)
-        if 0 <= current_index < len(self.image_files):
-            self.image_listbox.selection_clear(0, tk.END)
-            self.image_listbox.selection_set(self.drag_start_index)
-
-    def on_image_drop(self, event):
-        """Handle dropping of image"""
-        if not self.drag_drop_enabled or self.operation_in_progress or self.drag_start_index is None:
-            return
+        info_text = f"{settings['name']} - Quality: {settings['quality']}%, DPI: {settings['dpi']}"
+        self.compression_info.config(text=info_text)
         
-        # Reset cursor
-        self.image_listbox.config(cursor="")
+        # Update file stats with new estimation
+        self.update_file_stats()
         
-        # Get drop position
-        drop_index = self.image_listbox.nearest(event.y)
+        # Disable custom quality when preset is selected
+        if not self.custom_quality_var.get():
+            self.quality_var.set(settings['quality'])
+            self.quality_label.config(text=f"{settings['quality']}%")
+    
+    def toggle_custom_quality(self):
+        """Toggle custom quality controls"""
+        if self.custom_quality_var.get():
+            self.quality_scale.config(state='normal')
+            self.compression_var.set("Custom")
+            self.compression_info.config(text="Custom compression settings")
+        else:
+            self.quality_scale.config(state='disabled')
+            self.compression_var.set("Medium")
+            self.on_compression_change()
+    
+    def toggle_pause(self):
+        """Toggle pause state"""
+        self.request_pause()
         
-        if drop_index != self.drag_start_index and 0 <= drop_index < len(self.image_files):
-            # Move item
-            item = self.image_files.pop(self.drag_start_index)
-            self.image_files.insert(drop_index, item)
-            
-            # Update listbox
-            self.refresh_image_listbox()
-            
-            # Select moved item
-            self.image_listbox.selection_set(drop_index)
-            self.image_listbox.see(drop_index)
-        
-        self.drag_start_index = None
-
-    def view_log_file(self):
-        """Open the log file"""
-        try:
-            if os.path.exists(log_filename):
-                if sys.platform.startswith('win'):
-                    os.startfile(log_filename)
-                elif sys.platform.startswith('darwin'):
-                    os.system(f'open "{log_filename}"')
-                else:
-                    os.system(f'xdg-open "{log_filename}"')
-            else:
-                messagebox.showinfo("Info", "No log file found")
-        except Exception as e:
-            messagebox.showerror("Error", f"Could not open log file:\n{str(e)}")
-
-    def images_to_pdf_thread(self):
-        """Thread wrapper for conversion"""
+        if hasattr(self, '_pause_requested') and self._pause_requested:
+            self.pause_button.config(text="Resume")
+            self.progress_bar.pause()
+        else:
+            self.pause_button.config(text="Pause")
+            self.progress_bar.resume()
+    
+    def start_conversion(self):
+        """Start the conversion process"""
         if self.check_operation_in_progress():
             return
-            
+        
         if not self.image_files:
-            messagebox.showwarning("Warning", "Please select at least one image.")
+            messagebox.showwarning("Warning", "Please add at least one image")
             return
         
         # Validate files exist
-        missing_files = [f for f in self.image_files if not os.path.exists(f)]
-        
-        if missing_files:
-            error_msg = f"The following files were not found:\n"
-            for file in missing_files[:5]:
-                error_msg += f"• {os.path.basename(file)}\n"
-            if len(missing_files) > 5:
-                error_msg += f"... and {len(missing_files) - 5} more"
-            
-            messagebox.showerror("Error", error_msg)
-            
+        missing = [f for f in self.image_files if not os.path.exists(f)]
+        if missing:
+            messagebox.showerror(
+                "Error",
+                f"Some files are missing:\n{chr(10).join(missing[:5])}"
+                + (f"\n... and {len(missing)-5} more" if len(missing) > 5 else "")
+            )
             # Remove missing files
-            for file in missing_files:
-                if file in self.image_files:
-                    idx = self.image_files.index(file)
-                    self.image_files.remove(file)
-                    self.image_listbox.delete(idx)
-            
-            self.update_image_stats()
-            
+            self.image_files = [f for f in self.image_files if os.path.exists(f)]
+            self.refresh_file_list()
             if not self.image_files:
                 return
         
-        # Check estimated output size
-        estimated_size = sum(os.path.getsize(f) for f in self.image_files if os.path.exists(f)) / (1024 * 1024)
-        if estimated_size > Settings.MAX_PDF_SIZE_MB:
-            if not messagebox.askyesno("Warning", 
-                f"Estimated PDF size is large ({estimated_size:.0f} MB).\n"
-                "This may take a while. Continue?"):
-                return
-        
-        thread = threading.Thread(target=self.images_to_pdf_worker, daemon=True)
+        # Start conversion thread
+        thread = threading.Thread(target=self.conversion_worker, daemon=True)
         thread.start()
-
-    def images_to_pdf_worker(self):
-        """Worker function for PDF conversion"""
+    
+    def conversion_worker(self):
+        """Main conversion worker"""
         self.operation_started()
         output_path = None
+        temp_path = None
         
         try:
             # Get output path
@@ -1334,294 +1898,354 @@ class ImageToPDFTool(UIStateMixin):
             if not output_path:
                 return
             
-            logger.info(f"Starting PDF creation: {output_path}")
-            logger.info(f"Processing {len(self.image_files)} images")
+            logger.info(f"Starting conversion to: {output_path}")
             
             # Get settings
-            compress = self.compress_var.get()
-            quality = self.quality_var.get()
-            page_size = self.page_size_var.get()
-            preserve_exif = self.preserve_exif_var.get()
+            if self.custom_quality_var.get():
+                preset = "Custom"
+                quality = self.quality_var.get()
+                dpi = Settings.PDF_DPI
+            else:
+                preset = self.compression_var.get()
+                settings = Settings.COMPRESSION_PRESETS.get(preset, Settings.COMPRESSION_PRESETS['Medium'])
+                quality = settings['quality']
+                dpi = settings['dpi']
             
-            # Progress callback
-            def progress_callback(current, total, message="", detail=""):
-                self.root.after(0, lambda: self.img_progress.update(current, message, detail))
+            page_size_option = self.page_size_var.get()
+            use_pymupdf = self.use_pymupdf_var.get() if PYMUPDF_AVAILABLE else False
+            optimize = self.optimize_var.get()
             
-            # Cancel check
+            # Progress callbacks
+            def progress_callback(current, total, message=""):
+                self.root.after(0, lambda: self.progress_bar.update(current, message))
+            
             def cancel_check():
                 return self._cancel_requested
             
+            def pause_check():
+                return getattr(self, '_pause_requested', False)
+            
             # Start progress
-            total_steps = len(self.image_files) + 1
-            self.root.after(0, lambda: self.img_progress.start(total_steps, "Processing images..."))
+            total_steps = len(self.image_files) + 2
+            self.root.after(0, lambda: self.progress_bar.start(total_steps, "Processing images..."))
             
             # Process images
             processed_images, errors = self.image_processor.preprocess_images_batch(
                 self.image_files,
-                target_size=Settings.MAX_IMAGE_SIZE if compress else None,
-                quality=quality if compress else 100,
+                preset if preset != "Custom" else "Medium",
+                page_size=A4 if page_size_option == "A4" else letter if page_size_option == "Letter" else None,
                 progress_callback=progress_callback,
-                cancel_check=cancel_check
+                cancel_check=cancel_check,
+                pause_check=pause_check
             )
             
-            # Check cancellation
             if self._cancel_requested:
-                self.root.after(0, lambda: self.img_progress.reset())
-                self.root.after(0, lambda: messagebox.showinfo("Cancelled", "Operation was cancelled."))
-                logger.info("Operation cancelled by user")
+                self.root.after(0, lambda: self.progress_bar.reset())
+                logger.info("Conversion cancelled by user")
                 return
             
-            # Show errors
+            # Show errors if any
             if errors:
-                error_summary = f"Failed to process {len(errors)} image(s):\n\n"
-                for path, error in errors[:5]:
-                    error_summary += f"• {os.path.basename(path)}: {error}\n"
-                if len(errors) > 5:
-                    error_summary += f"\n... and {len(errors) - 5} more errors"
-                
-                self.root.after(0, lambda: messagebox.showwarning("Processing Errors", error_summary))
+                error_count = len(errors)
+                logger.warning(f"{error_count} images failed to process")
                 
                 if not processed_images:
                     raise Exception("No images could be processed successfully")
+                
+                # Show warning
+                self.root.after(0, lambda: messagebox.showwarning(
+                    "Processing Errors",
+                    f"{error_count} image(s) could not be processed.\n"
+                    f"Continuing with {len(processed_images)} images."
+                ))
             
             # Create PDF
-            self.root.after(0, lambda: self.img_progress.update(
-                len(processed_images), 
+            self.root.after(0, lambda: self.progress_bar.update(
+                len(self.image_files) + 1,
                 "Creating PDF...",
                 "Generating document..."
             ))
             
-            # Determine page size
-            if page_size == "A4":
-                pdf_page_size = A4
-            elif page_size == "Letter":
-                pdf_page_size = letter
+            # Use appropriate creator
+            if use_pymupdf:
+                logger.info("Using PyMuPDF for enhanced compression")
+                success = PDFCreator.create_pdf_pymupdf(
+                    output_path, processed_images, page_size_option,
+                    lambda c, t, m: progress_callback(len(self.image_files) + 1, total_steps, m),
+                    cancel_check
+                )
             else:
-                pdf_page_size = None
+                logger.info("Using ReportLab for PDF creation")
+                success = PDFCreator.create_pdf_reportlab(
+                    output_path, processed_images, page_size_option,
+                    lambda c, t, m: progress_callback(len(self.image_files) + 1, total_steps, m),
+                    cancel_check
+                )
             
-            # Create PDF
-            c = canvas.Canvas(output_path, pagesize=pdf_page_size if pdf_page_size else A4)
+            if self._cancel_requested:
+                if os.path.exists(output_path):
+                    os.remove(output_path)
+                return
             
-            # Add metadata
-            c.setAuthor("Image to PDF Converter Pro")
-            c.setTitle(f"PDF created on {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-            c.setSubject(f"Contains {len(processed_images)} images")
-            
-            # Process each image
-            for idx, img_data in enumerate(processed_images):
-                if cancel_check():
-                    logger.info("PDF creation cancelled")
-                    c.save()
-                    if os.path.exists(output_path):
-                        os.remove(output_path)
-                    self.root.after(0, lambda: self.img_progress.reset())
-                    self.root.after(0, lambda: messagebox.showinfo("Cancelled", "Operation was cancelled."))
-                    return
-                
-                try:
-                    # Update progress
-                    self.root.after(0, lambda idx=idx, total=len(processed_images): 
-                        self.img_progress.update(
-                            len(processed_images) + (idx / total),
-                            f"Adding page {idx + 1} of {total}",
-                            f"Processing {os.path.basename(img_data['path'])}"
-                        )
-                    )
-                    
-                    # Load image
-                    img = Image.open(io.BytesIO(img_data['data']))
-                    img_width, img_height = img.size
-                    
-                    if page_size == "Fit":
-                        # Set page size to match image
-                        c.setPageSize((img_width, img_height))
-                        c.drawImage(ImageReader(img), 0, 0, width=img_width, height=img_height)
-                    else:
-                        # Fit image to page
-                        page_width, page_height = pdf_page_size
-                        
-                        # Calculate scaling
-                        scale = min(page_width/img_width, page_height/img_height, 1.0)
-                        
-                        # Apply margin (1%) To Do: Add functionality to ask user
-                        # margin = 0.01
-                        # scale *= (1 - margin)
-                        
-                        scaled_width = img_width * scale
-                        scaled_height = img_height * scale
-                        
-                        # Center image
-                        x = (page_width - scaled_width) / 2
-                        y = (page_height - scaled_height) / 2
-                        
-                        c.drawImage(ImageReader(img), x, y, width=scaled_width, height=scaled_height)
-                    
-                    c.showPage()
-                    img.close()
-                    
-                    # Periodic cleanup
-                    if idx % 10 == 0:
-                        gc.collect()
-                    
-                except Exception as e:
-                    logger.error(f"Error adding image to PDF: {e}")
-                    logger.debug(f"Image data: {img_data}")
-            
-            # Save PDF
-            if not self._cancel_requested:
-                self.root.after(0, lambda: self.img_progress.update(
+            # Optimize if requested
+            if optimize and os.path.exists(output_path):
+                self.root.after(0, lambda: self.progress_bar.update(
                     total_steps - 0.5,
-                    "Finalizing PDF...",
-                    "Saving document..."
+                    "Optimizing PDF...",
+                    "Reducing file size..."
                 ))
                 
-                c.save()
+                temp_path = output_path + ".tmp"
+                if PDFCreator.optimize_pdf_size(output_path, temp_path):
+                    # Check if optimization reduced size
+                    original_size = os.path.getsize(output_path)
+                    optimized_size = os.path.getsize(temp_path)
+                    
+                    if optimized_size < original_size * 0.95:  # At least 5% reduction
+                        os.replace(temp_path, output_path)
+                        logger.info(f"PDF optimized: {original_size} -> {optimized_size} bytes")
+                    else:
+                        if os.path.exists(temp_path):
+                            os.remove(temp_path)
+            
+            # Verify result
+            if os.path.exists(output_path):
+                file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
+                input_size_mb = sum(os.path.getsize(f) for f in self.image_files if os.path.exists(f)) / (1024 * 1024)
+                compression_ratio = (1 - file_size_mb/input_size_mb) * 100 if input_size_mb > 0 else 0
                 
-                # Verify PDF
-                if os.path.exists(output_path):
-                    file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
-                    
-                    # Log success
-                    logger.info(f"PDF created successfully: {output_path}")
-                    logger.info(f"Size: {file_size_mb:.2f} MB, Pages: {len(processed_images)}")
-                    
-                    # Complete progress
-                    self.root.after(0, lambda: self.img_progress.complete("PDF created successfully!"))
-                    
-                    # Show success message
-                    success_msg = (
-                        f"✓ PDF created successfully!\n\n"
-                        f"📄 File: {os.path.basename(output_path)}\n"
-                        f"💾 Size: {file_size_mb:.2f} MB\n"
-                        f"📑 Pages: {len(processed_images)}\n"
-                        f"📁 Location: {os.path.dirname(output_path)}"
-                    )
-                    
-                    if errors:
-                        success_msg += f"\n\n⚠️ Note: {len(errors)} images could not be processed"
-                    
-                    result = messagebox.askyesno("Success", success_msg + "\n\nOpen the PDF file?")
-                    
-                    if result:
-                        # Open PDF
-                        try:
-                            if sys.platform.startswith('win'):
-                                os.startfile(output_path)
-                            elif sys.platform.startswith('darwin'):
-                                os.system(f'open "{output_path}"')
-                            else:
-                                os.system(f'xdg-open "{output_path}"')
-                        except:
-                            pass
-                else:
-                    raise Exception("PDF file was not created")
+                logger.info(f"PDF created successfully: {output_path}")
+                logger.info(f"Compression: {input_size_mb:.1f}MB -> {file_size_mb:.1f}MB ({compression_ratio:.1f}%)")
+                
+                self.root.after(0, lambda: self.progress_bar.complete("PDF created successfully!"))
+                
+                # Success dialog
+                success_msg = (
+                    f"✅ PDF created successfully!\n\n"
+                    f"📄 File: {os.path.basename(output_path)}\n"
+                    f"💾 Size: {file_size_mb:.2f} MB\n"
+                    f"📊 Compression: {compression_ratio:.1f}%\n"
+                    f"📑 Pages: {len(processed_images)}"
+                )
+                
+                result = messagebox.askyesno("Success", success_msg + "\n\nOpen the PDF file?")
+                
+                if result:
+                    try:
+                        if sys.platform.startswith('win'):
+                            os.startfile(output_path)
+                        elif sys.platform.startswith('darwin'):
+                            subprocess.run(['open', output_path])
+                        else:
+                            subprocess.run(['xdg-open', output_path])
+                    except:
+                        pass
             
         except MemoryError:
-            error_msg = (
-                "⚠️ Out of memory!\n\n"
-                "Try:\n"
-                "• Processing fewer images at once\n"
-                "• Enabling compression\n"
-                "• Reducing quality settings\n"
+            logger.error("Out of memory during conversion")
+            self.root.after(0, lambda: self.progress_bar.error("Memory error"))
+            self.root.after(0, lambda: messagebox.showerror(
+                "Memory Error",
+                "Out of memory! Try:\n"
+                "• Processing fewer images\n"
+                "• Using lower quality settings\n"
                 "• Closing other applications"
-            )
-            logger.error("Memory error during PDF creation")
-            self.root.after(0, lambda: self.img_progress.error("Memory error"))
-            self.root.after(0, lambda: messagebox.showerror("Memory Error", error_msg))
+            ))
             
         except Exception as e:
-            error_msg = f"❌ An error occurred:\n\n{str(e)}"
-            logger.error(f"PDF creation error: {e}")
+            logger.error(f"Conversion error: {e}")
             logger.debug(traceback.format_exc())
+            self.root.after(0, lambda: self.progress_bar.error("Conversion failed"))
+            self.root.after(0, lambda: messagebox.showerror("Error", f"Conversion failed:\n{str(e)}"))
             
-            self.root.after(0, lambda: self.img_progress.error("Error occurred"))
-            self.root.after(0, lambda: messagebox.showerror("Error", error_msg))
-            
-            # Clean up partial PDF
+            # Cleanup
             if output_path and os.path.exists(output_path):
                 try:
                     os.remove(output_path)
-                    logger.info(f"Cleaned up partial PDF: {output_path}")
                 except:
                     pass
                     
         finally:
-            # Force cleanup
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except:
+                    pass
+            
             gc.collect()
             self.operation_completed()
-            logger.info("PDF creation process completed")
+    
+    def show_settings(self):
+        """Show settings dialog"""
+        messagebox.showinfo("Settings", "Settings dialog not implemented in this version")
+    
+    def view_log(self):
+        """View log file"""
+        try:
+            if sys.platform.startswith('win'):
+                os.startfile(log_filename)
+            elif sys.platform.startswith('darwin'):
+                subprocess.run(['open', log_filename])
+            else:
+                subprocess.run(['xdg-open', log_filename])
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not open log file:\n{str(e)}")
+    
+    def show_help(self):
+        """Show help dialog"""
+        help_text = (
+            "Image to PDF Converter Pro v2.0\n\n"
+            "Features:\n"
+            "• Convert multiple image formats to PDF\n"
+            "• Support for JPEG, PNG, BMP, GIF, TIFF, WebP\n"
+            "• HEIF/HEIC support (if available)\n"
+            "• Compression presets for optimal file size\n"
+            "• Drag & drop to reorder images\n"
+            "• Multiple page size options\n"
+            "• Resource monitoring and throttling\n"
+            "• Batch processing with pause/resume\n\n"
+            "Tips:\n"
+            "• Use compression presets for best results\n"
+            "• Preview images before conversion\n"
+            "• Monitor resource usage during conversion\n"
+            "• Sort images before converting\n\n"
+            "Keyboard Shortcuts:\n"
+            "• Ctrl+A: Select all\n"
+            "• Delete: Remove selected\n"
+            "• Double-click: Preview image"
+        )
+        
+        messagebox.showinfo("Help", help_text)
+    
+    def save_preferences(self):
+        """Save user preferences"""
+        try:
+            prefs = {
+                'theme': self.current_theme,
+                'compression': self.compression_var.get(),
+                'page_size': self.page_size_var.get(),
+                'optimize': self.optimize_var.get(),
+                'auto_rotate': self.auto_rotate_var.get(),
+                'use_pymupdf': self.use_pymupdf_var.get()
+            }
+            
+            prefs_file = Path.home() / '.image_to_pdf_prefs.json'
+            with open(prefs_file, 'w') as f:
+                json.dump(prefs, f)
+                
+        except Exception as e:
+            logger.error(f"Error saving preferences: {e}")
+    
+    def load_preferences(self):
+        """Load user preferences"""
+        try:
+            prefs_file = Path.home() / '.image_to_pdf_prefs.json'
+            if prefs_file.exists():
+                with open(prefs_file, 'r') as f:
+                    prefs = json.load(f)
+                
+                self.current_theme = prefs.get('theme', 'clam')
+                
+                # Apply loaded preferences after UI is created
+                self.root.after(100, lambda: self._apply_loaded_preferences(prefs))
+                
+        except Exception as e:
+            logger.error(f"Error loading preferences: {e}")
+    
+    def _apply_loaded_preferences(self, prefs):
+        """Apply loaded preferences to UI"""
+        try:
+            if hasattr(self, 'compression_var'):
+                self.compression_var.set(prefs.get('compression', 'Medium'))
+            if hasattr(self, 'page_size_var'):
+                self.page_size_var.set(prefs.get('page_size', 'A4'))
+            if hasattr(self, 'optimize_var'):
+                self.optimize_var.set(prefs.get('optimize', True))
+            if hasattr(self, 'auto_rotate_var'):
+                self.auto_rotate_var.set(prefs.get('auto_rotate', True))
+            if hasattr(self, 'use_pymupdf_var') and PYMUPDF_AVAILABLE:
+                self.use_pymupdf_var.set(prefs.get('use_pymupdf', True))
+        except Exception as e:
+            logger.error(f"Error applying preferences: {e}")
+    
+    def on_closing(self):
+        """Handle window closing"""
+        if self.operation_in_progress:
+            if messagebox.askokcancel("Confirm", "Operation in progress. Do you want to quit?"):
+                self.request_cancel()
+                self.save_preferences()
+                self.root.destroy()
+        else:
+            self.save_preferences()
+            self.root.destroy()
 
 
 def main():
-    """Main entry point"""
+    """Main application entry point"""
     try:
         # Check Python version
-        import sys
         if sys.version_info < (3, 7):
             messagebox.showerror(
                 "Python Version Error",
-                "This application requires Python 3.7 or higher.\n"
+                f"This application requires Python 3.7 or higher.\n"
                 f"You are using Python {sys.version}"
             )
             return
         
-        # Check required libraries
-        required_modules = {
+        # Check required modules
+        required = {
             'PIL': 'Pillow',
             'reportlab': 'reportlab',
             'psutil': 'psutil'
         }
         
-        missing_modules = []
-        for module, package in required_modules.items():
+        missing = []
+        for module, package in required.items():
             try:
                 __import__(module)
             except ImportError:
-                missing_modules.append(package)
+                missing.append(package)
         
-        if missing_modules:
-            error_msg = (
-                "Missing required libraries:\n\n"
-                f"{', '.join(missing_modules)}\n\n"
-                "Install with:\n"
-                f"pip install {' '.join(missing_modules)}"
+        if missing:
+            messagebox.showerror(
+                "Missing Dependencies",
+                f"Please install required packages:\n\n"
+                f"pip install {' '.join(missing)}"
             )
-            messagebox.showerror("Missing Dependencies", error_msg)
             return
         
-        # Create and run application
+        # Create application
         root = tk.Tk()
         
         # Set icon if available
         try:
-            icon_path = os.path.join(os.path.dirname(__file__), 'icon.ico')
-            if os.path.exists(icon_path):
-                root.iconbitmap(icon_path)
+            icon_path = Path(__file__).parent / 'icon.ico'
+            if icon_path.exists():
+                root.iconbitmap(str(icon_path))
         except:
             pass
         
-        # Set minimum size
-        root.minsize(800, 600)
+        # Create app instance
+        app = ImageToPDFTool(root)
         
         # Center window
         root.update_idletasks()
-        x = (root.winfo_screenwidth() // 2) - (950 // 2)
-        y = (root.winfo_screenheight() // 2) - (750 // 2)
-        root.geometry(f"950x750+{x}+{y}")
+        width = root.winfo_width()
+        height = root.winfo_height()
+        x = (root.winfo_screenwidth() // 2) - (width // 2)
+        y = (root.winfo_screenheight() // 2) - (height // 2)
+        root.geometry(f'{width}x{height}+{x}+{y}')
         
-        # Create application
-        app = ImageToPDFTool(root)
-        
-        # Log startup info
-        logger.info("="*50)
-        logger.info("Application started successfully")
+        # Log startup
+        logger.info("="*60)
+        logger.info("Image to PDF Converter Pro v2.0 Started")
         logger.info(f"Platform: {sys.platform}")
-        logger.info(f"CPU count: {multiprocessing.cpu_count()}")
-        logger.info(f"Max workers: {Settings.MAX_WORKERS}")
-        logger.info(f"HEIF support: {HEIF_SUPPORT}")
-        logger.info("="*50)
+        logger.info(f"Python: {sys.version}")
+        logger.info(f"CPU cores: {multiprocessing.cpu_count()}")
+        logger.info(f"Available memory: {psutil.virtual_memory().available / (1024**3):.1f} GB")
+        logger.info("="*60)
         
-        # Run
+        # Run application
         root.mainloop()
         
     except Exception as e:
@@ -1631,8 +2255,7 @@ def main():
         try:
             messagebox.showerror(
                 "Startup Error",
-                f"Failed to start application:\n\n{str(e)}\n\n"
-                "Check the log file for details."
+                f"Failed to start application:\n\n{str(e)}"
             )
         except:
             print(f"CRITICAL ERROR: {e}")
@@ -1640,9 +2263,8 @@ def main():
 
 if __name__ == "__main__":
     # Configure multiprocessing for Windows
-    import sys
     if sys.platform.startswith('win'):
         multiprocessing.freeze_support()
     
     # Run application
-    main()      
+    main()            
