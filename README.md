@@ -23,8 +23,11 @@ A simple, user-friendly desktop application that converts your images into PDF f
 ✅ No internet connection required - works completely offline after installation
 
 ## 📥 Installation
+
+**Easy method (for Windows OS):**
+Just run the pdf_tool_latest.exe file.
  
-Run from Source Code:
+**Second Method - Run from Source Code:**
   
 **Step 1:** Install Python  
 
@@ -68,23 +71,25 @@ Browse to your images location
 Select one or more images (hold Ctrl/Cmd to select multiple)  
 Click "Open"  
 
+Preview Images:  
+Duble click an image to preview it.  
+
 Reposition Images:
-Use Move Up, Move down buttons after selecting an image
-OR
-Drag and Drop images from the preview window.
+Use Move Up, Move down buttons after selecting an image  
+OR  
+Drag and Drop images from the preview window.  
 
 Choose Conversion Type:  
-A4:
-Fit to image:  
+A4:  
+Fit to image:    
 
 
 Desired Output Options:  
-Program asks the desired save location as soon as conersion is requested.
-Names are auto generated based on timestamps
+Program asks the desired save location as soon as conversion is requested.  
+Names are auto generated based on timestamps  
  
 
-
-Select the quality with compression (default is 85%)  
+Select the quality(default is medium) and compression. Program will remember the selected preference for future use.  
 
 Wait for the success message  
 Find your PDF(s) in the chosen location.
